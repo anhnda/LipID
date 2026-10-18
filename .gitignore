@@ -1,0 +1,6 @@
+.git
+.idea
+.vscode
+*.pyc
+__pycache__/*
+git.push
