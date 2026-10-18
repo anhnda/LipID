@@ -130,12 +130,15 @@ class RandomLipschitz:
                  gen: torch.Generator, *, offset: float = 0.0, n_cones: int = 6):
         d = center.numel()
         dt, dev = center.dtype, center.device
+        # draw on the generator's device (CPU generators stay valid when the data lives on CUDA),
+        # then move: the same seed gives the same member on every device
+        gdev = gen.device if gen is not None else dev
 
         def unif(*shape):
-            return torch.rand(*shape, generator=gen, dtype=dt, device=dev)
+            return torch.rand(*shape, generator=gen, dtype=dt, device=gdev).to(dev)
 
         def gauss(*shape):
-            return torch.randn(*shape, generator=gen, dtype=dt, device=dev)
+            return torch.randn(*shape, generator=gen, dtype=dt, device=gdev).to(dev)
 
         self.L, self.sigma, self.offset = float(L), sigma, float(offset)
         self.yc = center / sigma

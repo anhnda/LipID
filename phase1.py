@@ -2,16 +2,26 @@
 phase1.py — Phase 1: mathematical validation of Attribution Identifiability Width (AIW).
 
     python -m pytest -q tests.py                      # unit tests first
-    python phase1.py --out phase1_quick --quick       # smoke run
-    python phase1.py --out phase1_out                 # full pre-registered grid
+    python phase1.py --out phase1_quick --quick       # pilot run (seed 0)
+    python phase1.py --out phase1_out \
+        --sci-rho-target 0.8 --sci-min-frac 0.25 --sci-min-sign-rate 0.10   # thresholds: YOUR choice,
+                                                      # fixed BEFORE the run (written to config.json)
+    python phase1.py --out phase1_out --device cpu    # default 'auto' = cuda if available
 
 Outputs in --out:
-    config.json      the exact configuration (pre-registration record)
+    config.json      the exact configuration (pre-registration record, incl. scientific thresholds)
     records.jsonl    one line per (d, rho, n_anchor, model, kappa, x, r, anchor mode)
-    stress.json      saturated anchors, sparse references, 2-D counterexample, stable-OOD
-    mc_coverage.json Hoeffding / empirical-Bernstein family-wise coverage (binomial test)
+    optimistic.jsonl (amendment v3) one line per (d, rho, n_anchor, model, x, r, anchor mode), NOT filtered
+                     by feasibility: rho and certificates at L_min = L_A(A), L_V = Lip(f on hybrids ∪ A),
+                     L_true (when known), geometric limit rho_inf, deterministic theorem checks
+    stress.json      saturated anchors, sparse references, 2-D counterexample (+ fa at L_V),
+                     u+v counterexample (rho = 1 - 1/L), stable-OOD
+    mc_coverage.json coverage on non-saturated references + negative control (shrunken radius)
     runtime.json     cost of pairwise bound vs hypercube LP vs Monte Carlo
-    summary.json     aggregated metrics + GO / NO-GO checks
+    summary.json     aggregated metrics, technical GO (PHASE1_GO) and the separate scientific verdict
+
+Record fields: LA_C = L_A(C) (calibration anchors only, sets L = kappa * LA_C);
+LA_used = L_A(A) with A = C ∪ {x} (domain) or C ∪ {x, r} (fixed). infeasible <=> LA_used > L.
 
 Data splits are disjoint draws: train (sigma only) | C_anchor | R_candidate | D_eval.
 sigma = 1.4826 * MAD on the train split, fixed before anything else.
@@ -22,6 +32,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import os
 import time
 import zlib
@@ -31,7 +42,8 @@ import numpy as np
 import torch
 from scipy.stats import binomtest, spearmanr
 
-from bounds import effective_sparsity, mc_pair_bounds, pair_bounds_exact
+from bounds import (effective_sparsity, geometric_rho_inf, hybrid_vertices, mc_pair_bounds,
+                    pair_bounds_exact, shapley_full)
 from envelope import (Member, RandomLipschitz, anchor_lipschitz, clamp_to_envelope,
                       envelope_violation, lipschitz_after_adding, lipschitz_violation)
 from hypercube_lp import HypercubeLP, Infeasible
@@ -95,6 +107,38 @@ AMENDMENT_V2 = {
     "pilot_seeds": list(PILOT_SEEDS),
 }
 
+AMENDMENT_V3 = {
+    "type": "post_confirmatory_grid_pre_P0",
+    "data_driven": True,
+    "observed_before_amendment": ("confirmatory grid (seed 1): median rho at kappa=1 = 0.374 / 0.725 / 0.936 / 0.979 "
+                                  "for d = 2..5; frozen-model violation 39% at kappa=1, 0.7% at kappa=4; MC coverage "
+                                  "config saturated (median exact rho ~ 1), hence a vacuous coverage test"),
+    "theory_added": [
+        "for fixed (A, x, r): rho_i(L) is non-decreasing in L and certified intervals are nested",
+        "rho_i(L) -> rho_inf_i (purely geometric) as L -> inf, and rho_i(L) <= rho_inf_i (upper bound ONLY)",
+        "optimistic ceiling: for every valid L >= L_min = L_A(A): rho(L) >= rho(L_min) and the signs / top-k "
+        "certified at L are a subset of those certified at L_min — no knowledge of L_true needed",
+        "local validity: at L_V = Lip(f on hybrids ∪ A) the interval provably contains phi(f) "
+        "(McShane extension of f restricted to hybrids ∪ A); L_min <= L_V <= L_true",
+    ],
+    "new_outputs": ("optimistic.jsonl: every instance at L_min, L_V and L_true (when known), no filtering by "
+                    "feasibility under L = kappa * L_A(C); deterministic theorem checks gate technical GO"),
+    "mc_changes": ("coverage run on references chosen BEFORE any sampling, by exact quantities only, as the least "
+                   "saturated feasible candidates; vacuity (median exact rho >= mc_rho_max) blocks GO; negative "
+                   "control: radius multiplied by mc_neg_scales, the mc_neg_required scale MUST be detected"),
+    "go_changes": ("PHASE1_GO = technical GO = stress checks AND grid correctness AND optimistic theorem checks AND "
+                   "MC coverage AND MC non-vacuous AND MC negative control detected; a skipped part is "
+                   "'not_evaluated' and blocks GO. The scientific verdict (S1/S2/S3) is separate and needs "
+                   "thresholds registered in config.json BEFORE the run"),
+    "failure_reporting": "infeasible rate, conditional violation rate, total failure rate — reported separately",
+    "confirmatory_seeds_disjoint_from_pilot": True,
+    "pilot_seeds": list(PILOT_SEEDS),
+}
+
+STRESS_GATED = ("saturated", "sparse_reference", "counterexample_2d", "uv_counterexample")
+TECH_GO_KEYS = ("stress_checks", "grid_correctness", "optimistic_theorem_checks",
+                "mc_coverage", "mc_non_vacuous", "mc_negative_control_detected")
+
 
 @dataclass
 class Config:
@@ -114,16 +158,26 @@ class Config:
     top_k: int = 2
     eff_eps: float = 0.1
     tol: float = 1e-6
-    # Monte Carlo coverage experiment
-    mc_d: int = 5
-    mc_rho: float = 0.9
-    mc_n_anchor: int = 64
-    mc_model: str = "fa"
-    mc_kappa: float = 1.5
+    # Monte Carlo coverage experiment (amendment v3: non-saturated references + negative control)
+    mc_d: int = 4
+    mc_rho: float = 0.0
+    mc_n_anchor: int = 256
+    mc_model: str = "linear"
+    mc_kappa: float = 1.25
     mc_K: int = 4
     mc_runs: int = 200
     mc_n_per_stratum: int = 32
     mc_eta: float = 0.05
+    mc_rho_max: float = 0.9              # coverage test counts only if median exact rho < this, per mode
+    mc_neg_scales: tuple = (0.0, 0.25)   # negative control: confidence radius multiplied by these
+    mc_neg_required: float = 0.0         # this scale MUST be detected (binomial test rejects at go_mc_pvalue)
+    # amendment v3: optimistic ceiling (L_min), local validity (L_V), geometric limit (rho_inf)
+    opt_topk_lp: bool = True             # top-k ceilings use the hypercube LP (<= 4 LPs per pair)
+    # scientific verdict: thresholds MUST be fixed before the run (CLI flags -> config.json)
+    sci_rho_target: "float | None" = None     # a feature-instance is informative if rho <= this
+    sci_min_frac: "float | None" = None       # fraction of informative feature-instances required
+    sci_min_sign_rate: "float | None" = None  # certified-sign rate at L_V required for S3
+    device: str = "auto"                 # 'auto' -> cuda if available; LPs always run on CPU (scipy)
     # runtime benchmark
     rt_dims: tuple = (4, 6, 8, 10, 12)
     rt_n_anchor: int = 256
@@ -136,7 +190,8 @@ class Config:
     go_lp_joint_gain: float = 0.10  # amendment v2: LP kept iff joint-certificate rate gain >= this
     rho_informative: float = 0.9    # report: fraction of features with rho_i < this
     run_kind: str = "confirmatory"
-    amendment: dict = field(default_factory=lambda: {"v1": dict(AMENDMENT), "v2": dict(AMENDMENT_V2)})
+    amendment: dict = field(default_factory=lambda: {"v1": dict(AMENDMENT), "v2": dict(AMENDMENT_V2),
+                                                     "v3": dict(AMENDMENT_V3)})
 
     @staticmethod
     def quick() -> "Config":
@@ -154,12 +209,21 @@ def gen_of(*key) -> torch.Generator:
     return torch.Generator().manual_seed(seed_of(*key))
 
 
-def gaussian_sampler(d: int, rho: float):
+def resolve_device(name: str) -> str:
+    if name == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if name.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"device {name!r} requested but CUDA is not available")
+    return name
+
+
+def gaussian_sampler(d: int, rho: float, device="cpu"):
+    """Draws on CPU with the CPU generator, then moves to `device`: identical numbers on every device."""
     cov = (1.0 - rho) * torch.eye(d) + rho * torch.ones(d, d)
     chol = torch.linalg.cholesky(cov)
 
     def sample(n: int, gen: torch.Generator) -> torch.Tensor:
-        return torch.randn(n, d, generator=gen) @ chol.T
+        return (torch.randn(n, d, generator=gen) @ chol.T).to(device)
     return sample
 
 
@@ -178,7 +242,7 @@ def make_model(name: str, a: float):
     identical to z_1 on the diagonal, different off it, with asymmetric Shapley effect."""
     if name == "linear":
         def f(Z):
-            return Z @ torch.linspace(1.0, 0.2, Z.shape[1], dtype=Z.dtype)
+            return Z @ linear_weights(Z.shape[1], Z.dtype, Z.device)
     elif name == "fa":
         def f(Z):
             return Z[:, 0] + a * torch.tanh(Z[:, 0]) * q(Z[:, :1] - Z[:, 1:]).sum(1)
@@ -191,6 +255,27 @@ def make_model(name: str, a: float):
     else:
         raise ValueError(name)
     return f
+
+
+def linear_weights(d: int, dtype=torch.float64, device="cpu") -> torch.Tensor:
+    return torch.linspace(1.0, 0.2, d, dtype=dtype, device=device)
+
+
+def lipschitz_true(name: str, d: int, sigma: torch.Tensor, a: float):
+    """Exact GLOBAL Lipschitz constant w.r.t. weighted l1, when known in closed form:
+    Lip = sup_z max_j |df/dz_j(z)| * sigma_j  (dual norm of weighted l1).
+      linear      : max_j |w_j| sigma_j
+      unstable_id : f = z_0 + a tanh(4 mean(z)); sup sech^2 = 1 at mean(z) = 0, so
+                    max((1 + 4a/d) sigma_0, max_{j>=1} (4a/d) sigma_j)
+    Other models -> None (use L_V, which needs no global bound)."""
+    s = sigma.detach().cpu().to(torch.float64)
+    if name == "linear":
+        return float((linear_weights(d).abs() * s).max())
+    if name == "unstable_id":
+        g = torch.full((d,), 4.0 * a / d, dtype=torch.float64)
+        g[0] += 1.0
+        return float((g * s).max())
+    return None
 
 
 def _np(v):
@@ -331,7 +416,7 @@ def run_deterministic(cfg: Config, out_dir: str) -> str:
     with open(path, "w") as fh:
         for d, rho, nA in itertools.product(cfg.dims, cfg.rhos, cfg.n_anchor):
             gd = gen_of("data", cfg.seed, d, rho, nA)
-            sample = gaussian_sampler(d, rho)
+            sample = gaussian_sampler(d, rho, cfg.device)
             sigma = robust_sigma(sample(cfg.n_train, gd))
             C, Rc, Xev = sample(nA, gd), sample(cfg.n_candidate, gd), sample(cfg.n_eval_x, gd)
             plan = [(xi, torch.randperm(cfg.n_candidate, generator=gd)[:cfg.refs_per_x].tolist())
@@ -380,11 +465,151 @@ def run_deterministic(cfg: Config, out_dir: str) -> str:
     return path
 
 
+# ======================================== amendment v3: optimistic ceiling + local validity
+def _topk_at(x, r, A, fAv, L, sigma, phi_f, cfg: Config):
+    """Top-k (by |phi_f|) certificate at a given L via the hypercube LP; None when not applicable."""
+    if not cfg.opt_topk_lp:
+        return None
+    d = x.numel()
+    m = int(((x - r).abs() > 0).sum())
+    k = min(cfg.top_k, m)
+    if not (1 <= k < d):
+        return None
+    try:
+        lp = HypercubeLP(x, r, A, fAv, L, sigma)
+    except Infeasible:
+        return dict(certified=None, infeasible=True)
+    T = lp.candidate_topk(k, phi=phi_f)
+    res = lp.certify_topk_abs(T, cfg.tol, stop_early=True)
+    return dict(T=T, certified=bool(res["certified"]))
+
+
+def evaluate_optimistic(x, r, A, fAv, L_min, L_true, sigma, f, cfg: Config) -> dict:
+    """One instance, independent of kappa (amendment v3).
+      L_min  = L_A(A): smallest feasible L. For EVERY valid L >= L_min: rho(L) >= rho(L_min) and the signs /
+               top-k certified at L are a subset of those at L_min (monotonicity + nesting) -> optimistic ceiling.
+      L_V    = Lip(f on hybrids ∪ A): the McShane extension of f restricted to hybrids ∪ A lies in F_{L_V}(A) and
+               has the same hybrid values, so phi(f) is PROVABLY inside the interval at L_V; L_min <= L_V <= L_true.
+      L_true = exact global constant when known (linear, unstable_id): cross-check only.
+      rho_inf: purely geometric limit; rho(L) <= rho_inf for every L (upper bound only).
+    'checks' are theorem checks: any value > tol is a bug (or a numerical problem), never a finding."""
+    tol = cfg.tol
+    d = x.numel()
+    Z, active = hybrid_vertices(x, r)
+    fZ = f(Z)
+    L_V = lipschitz_after_adding(L_min, A, fAv, Z, fZ, sigma)
+    phi_f = _np(shapley_full(fZ, active, d))
+    delta = _np((x - r).abs() / sigma)
+    rinf = _np(geometric_rho_inf(x, r, A, sigma))
+    act = np.zeros(d, dtype=bool)
+    act[active] = True
+
+    def feat(v):
+        return [float(v[j]) if act[j] else None for j in range(d)]
+
+    levels = dict(Lmin=L_min, LV=L_V)
+    if L_true is not None:
+        levels["Ltrue"] = max(L_true, L_min)
+    res = {}
+    for name, L in levels.items():
+        if not math.isfinite(L):
+            res[name] = None
+            continue
+        lo, hi, _ = pair_bounds_exact(x, r, A, fAv, L, sigma)
+        lo, hi = _np(lo), _np(hi)
+        rho = np.zeros(d)
+        rho[act] = (hi[act] - lo[act]) / (2.0 * L * delta[act])
+        sg = np.zeros(d, dtype=int)
+        sg[lo > tol] = 1
+        sg[hi < -tol] = -1
+        outside = max(0.0, float(np.max(lo - phi_f, initial=0.0)), float(np.max(phi_f - hi, initial=0.0)))
+        res[name] = dict(L=L, rho=feat(rho), sign=sg.tolist(), lo=lo.tolist(), hi=hi.tolist(),
+                         outside=outside, topk=_topk_at(x, r, A, fAv, L, sigma, phi_f, cfg))
+
+    chk = {}
+    lm, lv, lt = res.get("Lmin"), res.get("LV"), res.get("Ltrue")
+    if lm is not None and lv is not None:
+        rl = np.array([lm["rho"][j] for j in active])
+        rv = np.array([lv["rho"][j] for j in active])
+        chk["LV_contains_frozen"] = lv["outside"]
+        chk["rho_mono_Lmin_LV"] = float(np.max(rl - rv, initial=0.0))
+        chk["rho_le_inf"] = float(np.max(rv - rinf[act], initial=0.0))
+        chk["sign_nested"] = int(sum(1 for j in range(d) if lv["sign"][j] != 0 and lv["sign"][j] != lm["sign"][j]))
+        tv, tm = lv["topk"], lm["topk"]
+        chk["topk_nested"] = int(bool(tv and tm and tv.get("certified") and tm.get("certified") is False))
+        if lt is not None:
+            rt_ = np.array([lt["rho"][j] for j in active])
+            chk["rho_mono_LV_Ltrue"] = float(np.max(rv - rt_, initial=0.0))
+    if lt is not None:
+        chk["Ltrue_contains_frozen"] = lt["outside"]
+        chk["LV_le_Ltrue"] = max(0.0, (L_V - L_true) / L_true)   # relative
+    return dict(L_V=L_V, kappa_V=L_V / L_min, active=active, delta=delta.tolist(), phi_f=phi_f.tolist(),
+                rho_inf=feat(rinf), levels=res, checks=chk)
+
+
+def run_optimistic(cfg: Config, out_dir: str) -> str:
+    """Every (d, rho, n_anchor, model, x, r, mode) instance of the grid — the SAME draws as run_deterministic —
+    evaluated at L_min, L_V (and L_true when known). Nothing is dropped for being infeasible under
+    L = kappa * L_A(C): at L_min = L_A(A) the class is feasible by definition."""
+    path = os.path.join(out_dir, "optimistic.jsonl")
+    with open(path, "w") as fh:
+        for d, rho, nA in itertools.product(cfg.dims, cfg.rhos, cfg.n_anchor):
+            gd = gen_of("data", cfg.seed, d, rho, nA)          # identical sequence of draws to run_deterministic
+            sample = gaussian_sampler(d, rho, cfg.device)
+            sigma = robust_sigma(sample(cfg.n_train, gd))
+            C, Rc, Xev = sample(nA, gd), sample(cfg.n_candidate, gd), sample(cfg.n_eval_x, gd)
+            plan = [(xi, torch.randperm(cfg.n_candidate, generator=gd)[:cfg.refs_per_x].tolist())
+                    for xi in range(cfg.n_eval_x)]
+            for model in cfg.models:
+                t_cfg, n_deg = time.perf_counter(), 0
+                f = make_model(model, cfg.a)
+                fC, fX, fR = f(C), f(Xev), f(Rc)
+                LA_C = anchor_lipschitz(C, fC, sigma)
+                L_true = lipschitz_true(model, d, sigma, cfg.a)
+                for xi, ridx in plan:
+                    x = Xev[xi]
+                    A_dom = torch.cat([C, x[None]])
+                    f_dom = torch.cat([fC, fX[xi:xi + 1]])
+                    LA_dom = lipschitz_after_adding(LA_C, C, fC, x[None], fX[xi:xi + 1], sigma)
+                    for rj in ridx:
+                        r = Rc[rj]
+                        for mode in ("domain", "fixed"):
+                            if mode == "domain":
+                                A, fAv, L_min = A_dom, f_dom, LA_dom
+                            else:
+                                A = torch.cat([A_dom, r[None]])
+                                fAv = torch.cat([f_dom, fR[rj:rj + 1]])
+                                L_min = lipschitz_after_adding(LA_dom, A_dom, f_dom, r[None],
+                                                               fR[rj:rj + 1], sigma)
+                            rec = dict(d=d, rho=rho, n_anchor=nA, model=model, x_idx=xi, r_idx=rj, mode=mode,
+                                       eff_sparsity=effective_sparsity(x, r, sigma, cfg.eff_eps),
+                                       contrast=_f((fX[xi] - fR[rj]).abs()),
+                                       LA_cal=LA_C, L_min=L_min, L_true=L_true,
+                                       feasible_at_kappa1=bool(L_min <= LA_C * (1.0 + 1e-9)))
+                            if not (math.isfinite(L_min) and L_min > 0):
+                                rec["degenerate"] = True    # duplicate anchors with different values, or f const on A
+                                n_deg += 1
+                            else:
+                                rec.update(evaluate_optimistic(x, r, A, fAv, L_min, L_true, sigma, f, cfg))
+                            fh.write(json.dumps(rec, default=_json_default) + "\n")
+                print(f"[opt] d={d} rho={rho} nA={nA} {model:<11} degenerate={n_deg} "
+                      f"{time.perf_counter() - t_cfg:.1f}s", flush=True)
+    return path
+
+
 # ================================================================ Monte Carlo coverage
 def run_mc_coverage(cfg: Config, out_dir: str) -> dict:
+    """Family-wise coverage of the Monte Carlo certificates (amendment v3).
+    * The K references are fixed BEFORE any coalition is sampled, using exact quantities only: among feasible
+      candidates, the K least saturated (max over the two modes of the median exact rho). The validity
+      conditions of the MC bounds are untouched; the point is that a coverage test on saturated intervals
+      ([-L delta, L delta] contains everything) is vacuous.
+    * Vacuity is reported per mode (median exact rho) and gates technical GO via mc_rho_max.
+    * Negative control: identical runs with every confidence radius multiplied by mc_neg_scales. A test that
+      cannot detect a shrunken radius has no power; the mc_neg_required scale MUST be detected."""
     d, rho, nA = cfg.mc_d, cfg.mc_rho, cfg.mc_n_anchor
     gd = gen_of("mc-data", cfg.seed, d, rho, nA)
-    sample = gaussian_sampler(d, rho)
+    sample = gaussian_sampler(d, rho, cfg.device)
     sigma = robust_sigma(sample(cfg.n_train, gd))
     C, Rc, x = sample(nA, gd), sample(cfg.n_candidate, gd), sample(1, gd)[0]
     f = make_model(cfg.mc_model, cfg.a)
@@ -396,25 +621,42 @@ def run_mc_coverage(cfg: Config, out_dir: str) -> dict:
     if LA_dom > L:
         raise RuntimeError("x infeasible for the MC config; change seed or mc_kappa")
 
-    # K references fixed BEFORE any coalition sampling; feasible in both modes
-    refs = []
+    def anchors(mode, r, fr):
+        if mode == "domain":
+            return A_dom, f_dom
+        return torch.cat([A_dom, r[None]]), torch.cat([f_dom, fr.reshape(1)])
+
+    def median_rho(lo, hi, r):
+        dl = (x - r).abs() / sigma
+        act = dl > 0
+        return float(((hi - lo)[act] / (2.0 * L * dl[act])).median())
+
+    # K references fixed BEFORE any coalition sampling: feasible in both modes, least saturated (exact rho only)
+    scored = []
     for j in torch.randperm(cfg.n_candidate, generator=gd).tolist():
         r = Rc[j]
-        if lipschitz_after_adding(LA_dom, A_dom, f_dom, r[None], f(r[None]), sigma) <= L:
-            refs.append(j)
-        if len(refs) == cfg.mc_K:
-            break
-    if len(refs) < cfg.mc_K:
+        fr = f(r[None])[0]
+        if lipschitz_after_adding(LA_dom, A_dom, f_dom, r[None], fr.reshape(1), sigma) > L:
+            continue
+        worst = 0.0
+        for mode in ("domain", "fixed"):
+            A, fAv = anchors(mode, r, fr)
+            lo, hi, _ = pair_bounds_exact(x, r, A, fAv, L, sigma)
+            worst = max(worst, median_rho(lo, hi, r))
+        scored.append((worst, j))
+    if len(scored) < cfg.mc_K:
         raise RuntimeError("not enough feasible references for the MC config")
+    scored.sort()
+    refs = [j for _, j in scored[:cfg.mc_K]]
     R = Rc[refs]
     fR = f(R)
 
-    out = dict(L=L, refs=refs)
+    out = dict(L=L, refs=refs, n_feasible_candidates=len(scored),
+               selected_worst_median_rho=[w for w, _ in scored[:cfg.mc_K]])
     for mode in ("domain", "fixed"):
         lo_ex, hi_ex = [], []
         for k in range(cfg.mc_K):
-            A = A_dom if mode == "domain" else torch.cat([A_dom, R[k:k + 1]])
-            fAv = f_dom if mode == "domain" else torch.cat([f_dom, fR[k:k + 1]])
+            A, fAv = anchors(mode, R[k], fR[k])
             lo, hi, _ = pair_bounds_exact(x, R[k], A, fAv, L, sigma)
             lo_ex.append(lo)
             hi_ex.append(hi)
@@ -424,26 +666,40 @@ def run_mc_coverage(cfg: Config, out_dir: str) -> dict:
         twoLd_ex = 2.0 * L * (x.unsqueeze(0) - R).abs() / sigma
         act_ex = twoLd_ex > 0
         rho_ex = (B_ex[act_ex] / twoLd_ex[act_ex]).cpu().numpy()
+        med = float(np.median(rho_ex))
         out[f"rho_exact_{mode}"] = dict(
             quantiles_10_25_50_75_90=np.quantile(rho_ex, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist(),
-            frac_below=float(np.mean(rho_ex < cfg.rho_informative)))
-        for method in ("hoeffding", "bernstein", "best"):
+            frac_below=float(np.mean(rho_ex < cfg.rho_informative)),
+            median=med, non_vacuous=bool(med < cfg.mc_rho_max))
+
+        def coverage(method, scale):
             fails, ratios = 0, []
             for run in range(cfg.mc_runs):
-                g = gen_of("mc-run", cfg.seed, mode, run)   # same coalitions across methods
+                g = gen_of("mc-run", cfg.seed, mode, run)   # same coalitions across methods and scales
                 res = mc_pair_bounds(x, R, C, fC, L, sigma, fx=fx, fr=fR, mode=mode,
                                      n_per_stratum=cfg.mc_n_per_stratum, eta=cfg.mc_eta,
-                                     method=method, gen=g)
+                                     method=method, gen=g, radius_scale=scale)
                 fail = bool(((res.lo - lo_ex) > cfg.tol).any() or ((hi_ex - res.hi) > cfg.tol).any())
                 fails += int(fail)
                 if mask.any():
                     ratios.append(float(((res.hi - res.lo)[mask] / B_ex[mask]).median()))
             p = binomtest(fails, cfg.mc_runs, cfg.mc_eta, alternative="greater").pvalue
-            out[f"{mode}/{method}"] = dict(
-                fails=fails, runs=cfg.mc_runs, rate=fails / cfg.mc_runs, pvalue=float(p),
-                ok=bool(p >= cfg.go_mc_pvalue),
-                median_width_over_Bpair=float(np.median(ratios)) if ratios else None)
-            print(f"[mc] {mode}/{method}: fails={fails}/{cfg.mc_runs} p={p:.3f}", flush=True)
+            return dict(fails=fails, runs=cfg.mc_runs, rate=fails / cfg.mc_runs, pvalue=float(p),
+                        median_width_over_Bpair=float(np.median(ratios)) if ratios else None)
+
+        for method in ("hoeffding", "bernstein", "best"):
+            c = coverage(method, 1.0)
+            c["ok"] = bool(c["pvalue"] >= cfg.go_mc_pvalue)
+            out[f"{mode}/{method}"] = c
+            print(f"[mc] {mode}/{method}: fails={c['fails']}/{cfg.mc_runs} p={c['pvalue']:.3f} "
+                  f"median exact rho={med:.3f}", flush=True)
+        for scale in cfg.mc_neg_scales:
+            c = coverage("best", float(scale))
+            c["scale"] = float(scale)
+            c["detected"] = bool(c["pvalue"] < cfg.go_mc_pvalue)
+            out[f"negative/{mode}/scale={scale}"] = c
+            print(f"[mc-neg] {mode} radius x{scale}: fails={c['fails']}/{cfg.mc_runs} "
+                  f"detected={c['detected']}", flush=True)
     with open(os.path.join(out_dir, "mc_coverage.json"), "w") as fh:
         json.dump(out, fh, indent=2, default=_json_default)
     return out
@@ -481,7 +737,7 @@ def stress_sparse_reference(cfg: Config) -> dict:
     all others 0, so top-1 = {0} is certified by construction whenever f(x) != f(r)."""
     d, rho, nA = 4, 0.9, 64
     gd = gen_of("sparse", cfg.seed)
-    sample = gaussian_sampler(d, rho)
+    sample = gaussian_sampler(d, rho, cfg.device)
     sigma = robust_sigma(sample(cfg.n_train, gd))
     C, Rc, Xev = sample(nA, gd), sample(50, gd), sample(10, gd)
     f = make_model("fa", cfg.a)
@@ -541,7 +797,39 @@ def stress_counterexample_2d(cfg: Config) -> dict:
             ok = False
         rows.append(dict(kappa=kappa, L=L, lo=lo.tolist(), hi=hi.tolist(), phi_f0=phi0.tolist(),
                          phi_fa=phia.tolist(), f0_inside=in0, fa_inside=ina))
-    return dict(ok=ok, LA=LA, rows=rows)
+    # amendment v3: fa agrees with f0 on every anchor (q(0) = 0 on the diagonal), so at
+    # L_V(fa) = Lip(fa on hybrids ∪ A) phi(fa) MUST be inside the interval (theorem, gated)
+    Zv = HypercubeLP(x, r, A, fA, LA, sig).Z
+    LV_fa = lipschitz_after_adding(LA, A, fA, Zv, fa(Zv), sig)
+    lpv = HypercubeLP(x, r, A, fA, LV_fa, sig)
+    lo, hi = lpv.interval()
+    phia = lpv.shapley(fa(lpv.Z))
+    fa_inside_LV = bool(np.all(phia >= lo - cfg.tol) and np.all(phia <= hi + cfg.tol))
+    rho_LV = ((hi - lo) / (2.0 * LV_fa * _np(lpv.delta))).tolist()
+    return dict(ok=bool(ok and fa_inside_LV), LA=LA, rows=rows,
+                fa_at_LV=dict(L_V=LV_fa, kappa_needed=LV_fa / LA, lo=lo.tolist(), hi=hi.tolist(),
+                              phi_fa=phia.tolist(), inside=fa_inside_LV, rho=rho_LV))
+
+
+def stress_uv_counterexample(tol: float) -> dict:
+    """f(u, v) = u + v, anchors {(0,0), (1,1)}, x = (1,1), r = (0,0), sigma = 1 (L_A = L_true = 1).
+    Closed form for L >= 1: rho_1(L) = rho_2(L) = 1 - 1/L, while rho_inf = 1.
+    Guards against reading rho_inf ~ 1 as 'no valid L can be informative' (it is an upper bound only)."""
+    sig = torch.ones(2)
+    x, r = torch.tensor([1.0, 1.0]), torch.tensor([0.0, 0.0])
+    A = torch.stack([r, x])
+    fA = A.sum(1)
+    LA = anchor_lipschitz(A, fA, sig)
+    rows, err = [], 0.0
+    for L in (1.0, 1.1, 1.5, 2.0, 5.0, 10.0, 100.0):
+        lo, hi, _ = pair_bounds_exact(x, r, A, fA, L, sig)
+        rho = ((hi - lo) / (2.0 * L)).tolist()
+        pred = 1.0 - 1.0 / L
+        err = max(err, max(abs(v - pred) for v in rho))
+        rows.append(dict(L=L, rho=rho, pred=pred))
+    rinf = geometric_rho_inf(x, r, A, sig).tolist()
+    ok = err <= tol and abs(LA - 1.0) <= tol and max(abs(v - 1.0) for v in rinf) <= tol
+    return dict(ok=bool(ok), LA=LA, max_err=err, rho_inf=rinf, rows=rows)
 
 
 def stress_stable_ood(cfg: Config) -> dict:
@@ -549,7 +837,7 @@ def stress_stable_ood(cfg: Config) -> dict:
     flat but shifted away from the data diagonal. Expectation: variance ~ 0 while AIW is not."""
     d, rho, nA, kappa, noise = 3, 0.99, 64, 2.0, 0.05
     gd = gen_of("stable-ood", cfg.seed)
-    sample = gaussian_sampler(d, rho)
+    sample = gaussian_sampler(d, rho, cfg.device)
     sigma = robust_sigma(sample(cfg.n_train, gd))
     C, Rc, Xev = sample(nA, gd), sample(40, gd), sample(5, gd)
     f = make_model("stable_ood", cfg.a)
@@ -564,7 +852,7 @@ def stress_stable_ood(cfg: Config) -> dict:
         for j in range(8):
             lp = HypercubeLP(x, Rc[j], A, fAv, L, sigma)
             lo, hi = lp.interval()
-            Zn = lp.Z[:, None, :] + noise * sigma * torch.randn(lp.Z.shape[0], 32, d, generator=gd)
+            Zn = lp.Z[:, None, :] + noise * sigma * torch.randn(lp.Z.shape[0], 32, d, generator=gd).to(lp.Z.device)
             U.append(float(f(Zn.reshape(-1, d)).reshape(lp.Z.shape[0], 32).var(dim=1).mean()))
             Gs.append(float((hi - lo).sum()))
             phi = lp.shapley(f(lp.Z))
@@ -579,10 +867,11 @@ def run_stress(cfg: Config, out_dir: str) -> dict:
     out = dict(saturated=stress_saturated(cfg.tol),
                sparse_reference=stress_sparse_reference(cfg),
                counterexample_2d=stress_counterexample_2d(cfg),
+               uv_counterexample=stress_uv_counterexample(cfg.tol),
                stable_ood=stress_stable_ood(cfg))
     with open(os.path.join(out_dir, "stress.json"), "w") as fh:
         json.dump(out, fh, indent=2, default=_json_default)
-    for k in ("saturated", "sparse_reference", "counterexample_2d"):
+    for k in STRESS_GATED:
         print(f"[stress] {k}: ok={out[k]['ok']}", flush=True)
     return out
 
@@ -592,7 +881,7 @@ def run_runtime(cfg: Config, out_dir: str) -> list:
     rows = []
     for d in cfg.rt_dims:
         gd = gen_of("rt", cfg.seed, d)
-        sample = gaussian_sampler(d, 0.9)
+        sample = gaussian_sampler(d, 0.9, cfg.device)
         sigma = robust_sigma(sample(cfg.n_train, gd))
         C, x, r = sample(cfg.rt_n_anchor, gd), sample(1, gd)[0], sample(1, gd)[0]
         f = make_model("fa", cfg.a)
@@ -685,9 +974,113 @@ def _rho(recs: list, cfg: Config) -> dict:
                 frac_below=float(np.mean(v < cfg.rho_informative)), threshold=cfg.rho_informative)
 
 
-def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
-    S: dict = dict(run_kind=cfg.run_kind, seed=cfg.seed, amendment=cfg.amendment, go={})
-    det_ok = all(stress[k]["ok"] for k in ("saturated", "sparse_reference", "counterexample_2d"))
+def _failures(recs: list, keys: tuple, cfg: Config) -> dict:
+    """Amendment v3: infeasible rate, conditional violation rate (among feasible), total failure rate.
+    Per instance the total-failure indicator is non-increasing in kappa (nested intervals); the conditional
+    rate is not (its denominator changes with kappa), so compare kappas with the total rate."""
+    groups: dict = {}
+    for r in recs:
+        groups.setdefault(tuple(r[k] for k in keys), []).append(r)
+    out = {}
+    for g in sorted(groups, key=lambda t: tuple(str(v) for v in t)):
+        rs = groups[g]
+        n = len(rs)
+        n_inf = sum(bool(r.get("infeasible")) for r in rs)
+        feas = [r for r in rs if not r.get("infeasible")]
+        n_viol = sum(r["transfer_out"] > cfg.tol for r in feas)
+        out["/".join(f"{k}={v}" for k, v in zip(keys, g))] = dict(
+            n=n, infeasible_rate=n_inf / n,
+            conditional_violation_rate=n_viol / len(feas) if feas else None,
+            total_failure_rate=(n_inf + n_viol) / n)
+    return out
+
+
+OPT_LEVELS = ("Lmin", "LV", "Ltrue")
+OPT_CHECKS = ("LV_contains_frozen", "Ltrue_contains_frozen", "rho_mono_Lmin_LV", "rho_mono_LV_Ltrue",
+              "rho_le_inf", "sign_nested", "topk_nested", "LV_le_Ltrue")
+
+
+def _quant(v) -> "list | None":
+    v = np.asarray(v, dtype=float)
+    return np.quantile(v, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist() if v.size else None
+
+
+def _opt_group(rows: list, cfg: Config) -> dict:
+    """Optimistic-ceiling summary of a group of optimistic.jsonl rows (feature-instance level).
+    Lmin: ceiling for EVERY valid L (rho can only be larger, certificates only fewer).
+    LV  : the tightest interval that provably contains phi(f).
+    Ltrue: only for models with a closed-form global constant."""
+    rows = [r for r in rows if not r.get("degenerate")]
+    out: dict = dict(n_instances=len(rows))
+    if not rows:
+        return out
+    rinf = np.array([r["rho_inf"][j] for r in rows for j in r["active"]], dtype=float)
+    out["rho_inf"] = dict(quantiles_10_25_50_75_90=_quant(rinf),
+                          frac_below=float(np.mean(rinf < cfg.rho_informative)) if rinf.size else None)
+    for lev in OPT_LEVELS:
+        rs = [r for r in rows if r["levels"].get(lev)]
+        if not rs:
+            continue
+        rho = np.array([r["levels"][lev]["rho"][j] for r in rs for j in r["active"]], dtype=float)
+        sg = [r["levels"][lev]["sign"][j] != 0 for r in rs for j in r["active"]]
+        tk = [r["levels"][lev]["topk"]["certified"] for r in rs
+              if r["levels"][lev].get("topk") and r["levels"][lev]["topk"].get("certified") is not None]
+        e = dict(n_instances=len(rs), n_features=int(rho.size),
+                 rho_quantiles_10_25_50_75_90=_quant(rho),
+                 rho_frac_below=float(np.mean(rho < cfg.rho_informative)) if rho.size else None,
+                 cert_sign_rate=float(np.mean(sg)) if sg else None,
+                 cert_topk_rate=float(np.mean(tk)) if tk else None,
+                 frozen_outside_rate=float(np.mean([r["levels"][lev]["outside"] > cfg.tol for r in rs])))
+        if cfg.sci_rho_target is not None:
+            e["rho_frac_le_target"] = float(np.mean(rho <= cfg.sci_rho_target)) if rho.size else None
+        out[lev] = e
+    out["kappa_V_quantiles_10_25_50_75_90"] = _quant([r["kappa_V"] for r in rows])
+    out["L_min_over_LA_cal_quantiles_10_25_50_75_90"] = _quant(
+        [r["L_min"] / r["LA_cal"] for r in rows if r["LA_cal"] > 0])
+    out["feasible_at_kappa1_rate"] = float(np.mean([r["feasible_at_kappa1"] for r in rows]))
+    return out
+
+
+def _opt_checks(rows: list, cfg: Config) -> dict:
+    """Theorem checks from optimistic.jsonl (relative for LV_le_Ltrue): any value > tol is a bug."""
+    worst = {k: 0.0 for k in OPT_CHECKS}
+    n_over = {k: 0 for k in OPT_CHECKS}
+    for r in rows:
+        for k, v in r.get("checks", {}).items():
+            worst[k] = max(worst[k], float(v))
+            n_over[k] += int(float(v) > cfg.tol)
+    return dict(max=worst, n_over_tol=n_over, ok=all(n == 0 for n in n_over.values()))
+
+
+def _scientific(opt_by_d: dict, cfg: Config) -> dict:
+    """Pre-registered scenarios per d (thresholds from config.json, fixed before the run):
+      S3 valid_and_useful        : frac(rho(L_V) <= target) >= min_frac AND cert-sign rate at L_V >= min_sign_rate
+      S2 lost_to_model_roughness : not S3, but frac(rho(L_min) <= target) >= min_frac
+      S1 not_identifiable        : otherwise — even the optimistic ceiling at L_min fails"""
+    th = dict(rho_target=cfg.sci_rho_target, min_frac=cfg.sci_min_frac, min_sign_rate=cfg.sci_min_sign_rate)
+    if any(v is None for v in th.values()):
+        return dict(status="thresholds_not_registered", thresholds=th,
+                    note="pass --sci-rho-target, --sci-min-frac and --sci-min-sign-rate BEFORE the run")
+    verdict = {}
+    for key, g in opt_by_d.items():
+        lmin, lv = g.get("Lmin"), g.get("LV")
+        if not lmin or not lv or lv.get("rho_frac_le_target") is None:
+            verdict[key] = "no_data"
+        elif (lv["rho_frac_le_target"] >= cfg.sci_min_frac
+              and (lv["cert_sign_rate"] or 0.0) >= cfg.sci_min_sign_rate):
+            verdict[key] = "S3_valid_and_useful"
+        elif (lmin.get("rho_frac_le_target") or 0.0) >= cfg.sci_min_frac:
+            verdict[key] = "S2_lost_to_model_roughness"
+        else:
+            verdict[key] = "S1_not_identifiable"
+    return dict(status="evaluated", thresholds=th, verdict_by_d=verdict)
+
+
+def summarize(cfg: Config, out_dir: str, rec_path, opt_path, mc, stress, rt) -> dict:
+    S: dict = dict(run_kind=cfg.run_kind, seed=cfg.seed, device=cfg.device, amendment=cfg.amendment, go={})
+    stress_ok = all(stress[k]["ok"] for k in STRESS_GATED)
+    S["go"]["stress_checks"] = bool(stress_ok)
+    grid_ok = None
     joint_all = None
     if rec_path:
         with open(rec_path) as fh:
@@ -706,7 +1099,7 @@ def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
                                          n_over_tol=sum(r[k] > cfg.tol for r in feas))
         for k in ("sign_contra", "topk_contra", "joint_contra"):
             S["deterministic"][k] = sum(r[k] for r in feas)
-        det_ok = det_ok and all(S["deterministic"][k]["n_over_tol"] == 0 for k in fields) \
+        grid_ok = all(S["deterministic"][k]["n_over_tol"] == 0 for k in fields) \
             and all(S["deterministic"][k] == 0 for k in ("sign_contra", "topk_contra", "joint_contra"))
 
         # Proposition: LP interval == pairwise interval => interval-tightness criterion is void
@@ -741,21 +1134,63 @@ def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
         S["transfer"] = dict(  # empirical, not a theorem check
             frozen_phi_outside_rate=float(np.mean([r["transfer_out"] > cfg.tol for r in feas])) if feas else None,
             envelope_violation_rate=float(np.mean([r["VL"] > cfg.tol for r in feas])) if feas else None)
-    S["go"]["deterministic_correctness"] = bool(det_ok)
+        # amendment v3: three failure rates, reported separately
+        S["failure_by_kappa"] = _failures(recs, ("kappa",), cfg)
+        S["failure_by_d_kappa"] = _failures(recs, ("d", "kappa"), cfg)
+        S["failure_by_model_kappa"] = _failures(recs, ("model", "kappa"), cfg)
+    S["go"]["grid_correctness"] = bool(grid_ok) if rec_path else "not_evaluated"
+    S["go"]["deterministic_correctness"] = bool(stress_ok and grid_ok) if rec_path else "not_evaluated"
+
+    # amendment v3: optimistic ceiling (L_min), local validity (L_V), geometric limit — every instance
+    if opt_path:
+        with open(opt_path) as fh:
+            rows = [json.loads(line) for line in fh]
+        modes = ("domain", "fixed")
+        by_d = {f"d={d}": _opt_group([r for r in rows if r["d"] == d], cfg) for d in cfg.dims}
+        S["optimistic"] = dict(
+            n_rows=len(rows), n_degenerate=sum(bool(r.get("degenerate")) for r in rows),
+            overall=_opt_group(rows, cfg), by_d=by_d,
+            by_d_mode={f"d={d}/{m}": _opt_group([r for r in rows if r["d"] == d and r["mode"] == m], cfg)
+                       for d in cfg.dims for m in modes},
+            by_d_model={f"d={d}/{mo}": _opt_group([r for r in rows if r["d"] == d and r["model"] == mo], cfg)
+                        for d in cfg.dims for mo in cfg.models},
+            by_d_rho={f"d={d}/rho={rh}": _opt_group([r for r in rows if r["d"] == d and r["rho"] == rh], cfg)
+                      for d in cfg.dims for rh in cfg.rhos},
+            by_d_nA={f"d={d}/nA={n}": _opt_group([r for r in rows if r["d"] == d and r["n_anchor"] == n], cfg)
+                     for d in cfg.dims for n in cfg.n_anchor})
+        chk = _opt_checks(rows, cfg)
+        S["optimistic_theorem_checks"] = chk
+        S["go"]["optimistic_theorem_checks"] = chk["ok"]
+        S["scientific"] = _scientific(by_d, cfg)
+    else:
+        S["go"]["optimistic_theorem_checks"] = "not_evaluated"
+        S["scientific"] = dict(status="not_evaluated")
+
     if mc:
-        S["mc"] = {k: v for k, v in mc.items() if "/" in k}
+        cov = {k: v for k, v in mc.items() if "/" in k and not k.startswith("negative/")}
+        neg = {k: v for k, v in mc.items() if k.startswith("negative/")}
+        S["mc"], S["mc_negative_control"] = cov, neg
         S["mc_rho_exact"] = {k: v for k, v in mc.items() if k.startswith("rho_exact_")}
-        S["go"]["mc_coverage"] = all(v["ok"] for v in S["mc"].values())
+        S["go"]["mc_coverage"] = all(v["ok"] for v in cov.values())
+        S["go"]["mc_non_vacuous"] = all(v["non_vacuous"] for v in S["mc_rho_exact"].values())
+        req = [v for v in neg.values() if v["scale"] == cfg.mc_neg_required]
+        S["go"]["mc_negative_control_detected"] = bool(req) and all(v["detected"] for v in req)
+    else:
+        for k in ("mc_coverage", "mc_non_vacuous", "mc_negative_control_detected"):
+            S["go"][k] = "not_evaluated"
     if rt:
         S["runtime"] = rt
-    # amendment v2: Phase 1 GO = correctness + MC coverage; the LP decision is reported separately
-    S["go"]["PHASE1_GO"] = all(S["go"].values())
+    # amendment v3: technical GO; any skipped part is 'not_evaluated' and blocks it
+    S["go"]["PHASE1_GO"] = all(S["go"].get(k) is True for k in TECH_GO_KEYS)
+    S["go"]["PHASE1_GO_meaning"] = ("technical GO only: correctness + theorem checks + a valid, non-vacuous, "
+                                    "sensitive MC test. Usefulness = the separate 'scientific' verdict")
     S["go"]["lp_interval_tightness"] = "void_by_theorem"
     if joint_all is not None:
         S["go"]["lp_retained_for_joint_certificates"] = joint_all["lp_retained"]
     with open(os.path.join(out_dir, "summary.json"), "w") as fh:
         json.dump(S, fh, indent=2, default=_json_default)
     print(json.dumps(S["go"], indent=2, default=_json_default))
+    print(json.dumps(S["scientific"], indent=2, default=_json_default))
     return S
 
 
@@ -766,22 +1201,38 @@ def main():
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--seed", type=int, default=None,
                     help="default: 0 for --quick (pilot), 1 for the confirmatory grid")
-    ap.add_argument("--skip", nargs="*", default=[], choices=["det", "mc", "runtime"])
+    ap.add_argument("--skip", nargs="*", default=[], choices=["det", "opt", "mc", "runtime"],
+                    help="skipped parts are 'not_evaluated' and block PHASE1_GO")
+    ap.add_argument("--device", default=None, help="auto (default) | cpu | cuda | cuda:N")
+    ap.add_argument("--sci-rho-target", type=float, default=None,
+                    help="scientific verdict: informative iff rho <= this (register BEFORE the run)")
+    ap.add_argument("--sci-min-frac", type=float, default=None,
+                    help="scientific verdict: required fraction of informative feature-instances")
+    ap.add_argument("--sci-min-sign-rate", type=float, default=None,
+                    help="scientific verdict: required certified-sign rate at L_V for S3")
     args = ap.parse_args()
     cfg = Config.quick() if args.quick else Config()
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.device is not None:
+        cfg.device = args.device
+    cfg.device = resolve_device(cfg.device)
+    for name in ("sci_rho_target", "sci_min_frac", "sci_min_sign_rate"):
+        if getattr(args, name) is not None:
+            setattr(cfg, name, getattr(args, name))
     if cfg.run_kind == "confirmatory" and cfg.seed in PILOT_SEEDS:
         ap.error(f"seed {cfg.seed} was used by the pilot; the confirmatory grid needs a fresh seed "
                  f"(amendment: confirmatory_seeds_disjoint_from_pilot)")
     os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "config.json"), "w") as fh:
+    with open(os.path.join(args.out, "config.json"), "w") as fh:   # written BEFORE anything runs
         json.dump(asdict(cfg), fh, indent=2, default=_json_default)
+    print(f"[cfg] device={cfg.device} seed={cfg.seed} run_kind={cfg.run_kind}", flush=True)
     stress = run_stress(cfg, args.out)
     rec_path = None if "det" in args.skip else run_deterministic(cfg, args.out)
+    opt_path = None if "opt" in args.skip else run_optimistic(cfg, args.out)
     mc = None if "mc" in args.skip else run_mc_coverage(cfg, args.out)
     rt = None if "runtime" in args.skip else run_runtime(cfg, args.out)
-    summarize(cfg, args.out, rec_path, mc, stress, rt)
+    summarize(cfg, args.out, rec_path, opt_path, mc, stress, rt)
 
 
 if __name__ == "__main__":

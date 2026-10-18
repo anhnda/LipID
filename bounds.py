@@ -73,6 +73,58 @@ def effective_sparsity(x: Tensor, r: Tensor, sigma: Tensor, eps: float) -> int:
     return int(((x - r).abs() / sigma > eps).sum())
 
 
+def hybrid_vertices(x: Tensor, r: Tensor, *, max_players: int = 16) -> tuple[Tensor, list[int]]:
+    """All 2^m hybrid vertices z_S over the active features (x_j != r_j), in the bit order shared by
+    pair_bounds_exact, HypercubeLP and shapley_from_vertex_values. Returns (Z, active)."""
+    active = torch.nonzero(x != r).flatten().tolist()
+    m = len(active)
+    if m > max_players:
+        raise ValueError(f"{m} active features > max_players={max_players}")
+    return vertex_points(x, r, active, all_masks(m, x.device)), active
+
+
+def shapley_full(vals: Tensor, active: list[int], d: int) -> Tensor:
+    """Exact Shapley values (full d; inactive features = 0) of the game whose values at the hybrid
+    vertices (hybrid_vertices order) are `vals`."""
+    out = vals.new_zeros(d)
+    if active:
+        out[active] = shapley_from_vertex_values(vals, len(active))
+    return out
+
+
+def geometric_rho_inf(x: Tensor, r: Tensor, A: Tensor, sigma: Tensor, *,
+                      max_players: int = 16) -> Tensor:
+    """Large-L limit of the normalized AIW (amendment v3), purely geometric (no model values):
+        rho_inf_i = sum_S w_S min(1, [d(z+, A) + d(z-, A)] / delta_i)
+    For fixed (A, x, r):  rho_i(L) is non-decreasing in L,  rho_i(L) <= rho_inf_i,  rho_i(L) -> rho_inf_i.
+    (At t = 1/L = 0 the class is {Lip <= 1, = 0 on A}; apply the exact pairwise formula with
+    ell = -d(., A), h = d(., A).)  rho_inf <= min(1, D_i / delta_i).
+    CAUTION: an UPPER bound only — rho_inf ~ 1 does not imply rho(L) ~ 1 at finite L
+    (f(u, v) = u + v, anchors {(0,0), (1,1)}: rho(L) = 1 - 1/L while rho_inf = 1).
+    Inactive features (x_j = r_j) get 0 (rho undefined there; filter by delta > 0)."""
+    d = x.numel()
+    delta = (x - r).abs() / sigma
+    active = torch.nonzero(delta > 0).flatten().tolist()
+    m = len(active)
+    out = x.new_zeros(d)
+    if m == 0:
+        return out
+    if m > max_players:
+        raise ValueError(f"{m} active features > max_players={max_players}")
+    masks = all_masks(m, x.device)
+    Z = vertex_points(x, r, active, masks)
+    q = dist_to_set(Z, A, sigma)
+    w = shapley_weights(m, x.dtype, x.device)
+    idx = torch.arange(2 ** m, device=x.device)
+    pop = masks.sum(1)
+    for jj, j in enumerate(active):
+        bit = 1 << jj
+        S = idx[(idx & bit) == 0]
+        P = S | bit
+        out[j] = (w[pop[S]] * torch.clamp((q[P] + q[S]) / delta[j], max=1.0)).sum()
+    return out
+
+
 # --------------------------------------------------------- exact pairwise bounds
 def pair_bounds_exact(x: Tensor, r: Tensor, A: Tensor, fA: Tensor, L: float, sigma: Tensor, *,
                       max_players: int = 16) -> tuple[Tensor, Tensor, Tensor]:
@@ -120,8 +172,10 @@ def coalition_masks(i: int, d: int, n_per_stratum: int, gen: torch.Generator | N
                     device="cpu") -> Tensor:
     """Stratified Shapley coalitions for feature i: shape (d, n0, d) bool.
     Stratum k (k = 0..d-1) holds n0 uniform subsets of size k of [d] minus {i}.
-    P(S) = (1/d) / C(d-1, k) = Shapley weight, so the stratum-average of stratum means is unbiased."""
-    keys = torch.rand(d, n_per_stratum, d, generator=gen, device=device)
+    P(S) = (1/d) / C(d-1, k) = Shapley weight, so the stratum-average of stratum means is unbiased.
+    Keys are drawn on the generator's device, then moved (CPU generator + CUDA data is allowed)."""
+    gdev = gen.device if gen is not None else device
+    keys = torch.rand(d, n_per_stratum, d, generator=gen, device=gdev).to(device)
     keys[..., i] = 2.0  # largest key -> never among the first k (k <= d-1)
     ranks = keys.argsort(dim=-1).argsort(dim=-1)
     k = torch.arange(d, device=device).view(d, 1, 1)
@@ -157,7 +211,7 @@ class MCResult:
 def mc_pair_bounds(x: Tensor, refs: Tensor, A: Tensor, fA: Tensor, L: float, sigma: Tensor, *,
                    fx: Tensor, fr: Tensor | None = None, mode: str = "domain",
                    n_per_stratum: int = 64, eta: float = 0.05, method: str = "best",
-                   gen: torch.Generator | None = None) -> MCResult:
+                   gen: torch.Generator | None = None, radius_scale: float = 1.0) -> MCResult:
     """High-probability bounds on exact Shapley values, uniformly over F_L(anchors),
     over all d features and all K references. No model evaluation at hybrid inputs.
 
@@ -166,9 +220,13 @@ def mc_pair_bounds(x: Tensor, refs: Tensor, A: Tensor, fA: Tensor, L: float, sig
     method: 'hoeffding' | 'bernstein' | 'best' (eta split in half, tighter side kept).
     The caller must ensure L >= L_A of every anchor set used (see envelope.lipschitz_after_adding).
     Strata k = 0 and k = d-1 contain a single coalition and are handled exactly (radius 0).
+    radius_scale: multiplies every confidence radius. 1.0 = the valid bound. Values < 1 are a
+    NEGATIVE CONTROL only (deliberately invalid bounds that a coverage test must detect).
     """
     if mode not in ("domain", "fixed"):
         raise ValueError(mode)
+    if radius_scale < 0:
+        raise ValueError("radius_scale must be >= 0")
     if method not in ("hoeffding", "bernstein", "best"):
         raise ValueError(method)
     if mode == "fixed" and fr is None:
@@ -218,7 +276,7 @@ def mc_pair_bounds(x: Tensor, refs: Tensor, A: Tensor, fA: Tensor, L: float, sig
         if method in ("hoeffding", "best"):
             eta_side = eta_h / (2 * K * d)
             # estimator = (1/d) sum_k mean_k; random part = s_nd strata x n0 samples of weight 1/(d n0)
-            t = R * math.sqrt(s_nd * math.log(1.0 / eta_side) / (2.0 * d ** 2 * n0))
+            t = radius_scale * R * math.sqrt(s_nd * math.log(1.0 / eta_side) / (2.0 * d ** 2 * n0))
             lo_i = torch.maximum(lo_i, a_hat[:, i] - t)
             hi_i = torch.minimum(hi_i, b_hat[:, i] + t)
         if method in ("bernstein", "best"):
@@ -226,8 +284,8 @@ def mc_pair_bounds(x: Tensor, refs: Tensor, A: Tensor, fA: Tensor, L: float, sig
                 rad_a = rad_b = torch.zeros_like(am)
             else:
                 dconf = eta_b / (2 * K * d * s_nd)
-                rad_a = _eb_radius(a, R.view(K, 1), dconf) * nondeg
-                rad_b = _eb_radius(b, R.view(K, 1), dconf) * nondeg
+                rad_a = radius_scale * _eb_radius(a, R.view(K, 1), dconf) * nondeg
+                rad_b = radius_scale * _eb_radius(b, R.view(K, 1), dconf) * nondeg
             lo_i = torch.maximum(lo_i, (am - rad_a).mean(-1))
             hi_i = torch.minimum(hi_i, (bm + rad_b).mean(-1))
         # a_S >= -L delta and b_S <= L delta deterministically

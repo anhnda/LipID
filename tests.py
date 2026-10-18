@@ -10,8 +10,12 @@ import numpy as np
 import pytest
 import torch
 
-from bounds import (coalition_masks, mc_pair_bounds, pair_bounds_exact, shapley_weights)
-from envelope import (Member, RandomLipschitz, anchor_lipschitz, envelopes, lipschitz_violation)
+from scipy.optimize import linprog
+
+from bounds import (coalition_masks, geometric_rho_inf, hybrid_vertices, mc_pair_bounds,
+                    pair_bounds_exact, shapley_full, shapley_weights)
+from envelope import (Member, RandomLipschitz, anchor_lipschitz, envelopes, lipschitz_after_adding,
+                      lipschitz_violation)
 from hypercube_lp import HypercubeLP
 
 torch.set_default_dtype(torch.float64)
@@ -224,3 +228,179 @@ def test_cross_free_edges_d2_domain():
     s = _setup(d=2, seed=7)
     lp = HypercubeLP(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
     assert lp.cross_free_edges().tolist() == [1, 1]
+
+
+# ============================================================ amendment v3 (P0)
+# Independent references: plain Python loops / an LP written from scratch, sharing no helper with the
+# code under test (envelopes, vertex_points, all_masks, shapley_weights, HypercubeLP).
+
+def _envelopes_loop(Z, A, fA, L, sigma):
+    sig = sigma.tolist()
+    lo, hi = [], []
+    for z in Z.tolist():
+        best_lo, best_hi = -math.inf, math.inf
+        for u, fu in zip(A.tolist(), fA.tolist()):
+            dist = sum(abs(p - q) / s for p, q, s in zip(z, u, sig))
+            best_lo = max(best_lo, fu - L * dist)
+            best_hi = min(best_hi, fu + L * dist)
+        lo.append(best_lo)
+        hi.append(best_hi)
+    return torch.tensor(lo), torch.tensor(hi)
+
+
+def _independent_interval(x, r, A, fA, L, sigma):
+    """Exact class interval by an LP over ALL vertex pairs + explicit anchor constraints
+    (no hypercube edges, no envelope box). Valid by McShane: such vertex values extend to a member."""
+    d = x.numel()
+    xs, rs, ss = x.tolist(), r.tolist(), sigma.tolist()
+    active = [j for j in range(d) if xs[j] != rs[j]]
+    m = len(active)
+    verts = []
+    for v in range(2 ** m):
+        z = list(rs)
+        for jj, j in enumerate(active):
+            if (v >> jj) & 1:
+                z[j] = xs[j]
+        verts.append(z)
+
+    def dist(a, b):
+        return sum(abs(p - q) / s for p, q, s in zip(a, b, ss))
+
+    n = len(verts)
+    rows, rhs = [], []
+    for a in range(n):
+        for b in range(a + 1, n):
+            dd = L * dist(verts[a], verts[b])
+            row = [0.0] * n
+            row[a], row[b] = 1.0, -1.0
+            rows.append(row)
+            rhs.append(dd)
+            row = [0.0] * n
+            row[a], row[b] = -1.0, 1.0
+            rows.append(row)
+            rhs.append(dd)
+        for u, fu in zip(A.tolist(), fA.tolist()):
+            dd = L * dist(verts[a], u)
+            row = [0.0] * n
+            row[a] = 1.0
+            rows.append(row)
+            rhs.append(fu + dd)        # t_a - f(u) <= L d
+            row = [0.0] * n
+            row[a] = -1.0
+            rows.append(row)
+            rhs.append(dd - fu)        # f(u) - t_a <= L d
+    lo, hi = np.zeros(d), np.zeros(d)
+    for jj, j in enumerate(active):
+        c = [0.0] * n
+        for v in range(n):
+            if (v >> jj) & 1:
+                continue
+            k = bin(v).count("1")
+            w = math.factorial(k) * math.factorial(m - 1 - k) / math.factorial(m)
+            c[v | (1 << jj)] += w
+            c[v] -= w
+        rmin = linprog(c, A_ub=rows, b_ub=rhs, bounds=[(None, None)] * n, method="highs")
+        rmax = linprog([-ci for ci in c], A_ub=rows, b_ub=rhs, bounds=[(None, None)] * n, method="highs")
+        assert rmin.status == 0 and rmax.status == 0
+        lo[j], hi[j] = rmin.fun, -rmax.fun
+    return lo, hi
+
+
+def test_envelopes_match_independent_loop():
+    s = _setup(d=4, seed=8)
+    Z = torch.randn(30, 4, generator=s["g"]) * 2
+    lo, hi = envelopes(Z, s["A"], s["fA"], s["L"], s["sigma"])
+    lo2, hi2 = _envelopes_loop(Z, s["A"], s["fA"], s["L"], s["sigma"])
+    assert torch.allclose(lo, lo2, atol=1e-10) and torch.allclose(hi, hi2, atol=1e-10)
+
+
+@pytest.mark.parametrize("d", [2, 3, 4])
+@pytest.mark.parametrize("fixed", [False, True])
+def test_pairwise_matches_independent_lp(d, fixed):
+    """Proposition 3 checked against an LP that shares no code with pair_bounds_exact / HypercubeLP."""
+    s = _setup(d=d, n=20, seed=20 + d, fixed=fixed)
+    lo_p, hi_p, _ = pair_bounds_exact(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
+    lo_i, hi_i = _independent_interval(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
+    assert np.allclose(lo_p.numpy(), lo_i, atol=TOL) and np.allclose(hi_p.numpy(), hi_i, atol=TOL)
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+def test_rho_monotone_nested_and_bounded_by_rho_inf(fixed):
+    """rho(L) non-decreasing in L, intervals nested, rho(L) <= rho_inf, rho(L) -> rho_inf."""
+    s = _setup(d=4, seed=9, fixed=fixed)
+    LA = anchor_lipschitz(s["A"], s["fA"], s["sigma"])
+    delta = (s["x"] - s["r"]).abs() / s["sigma"]
+    rinf = geometric_rho_inf(s["x"], s["r"], s["A"], s["sigma"])
+    prev = None
+    for k in (1.0, 1.1, 1.5, 2.0, 4.0, 16.0, 1e3):
+        L = k * LA
+        lo, hi, _ = pair_bounds_exact(s["x"], s["r"], s["A"], s["fA"], L, s["sigma"])
+        rho = (hi - lo) / (2 * L * delta)
+        assert torch.all(rho <= rinf + TOL)
+        if prev is not None:
+            p_rho, p_lo, p_hi = prev
+            assert torch.all(rho >= p_rho - TOL)
+            assert torch.all(lo <= p_lo + TOL) and torch.all(hi >= p_hi - TOL)
+        prev = (rho, lo, hi)
+    L = 1e9 * LA
+    lo, hi, _ = pair_bounds_exact(s["x"], s["r"], s["A"], s["fA"], L, s["sigma"])
+    assert torch.allclose((hi - lo) / (2 * L * delta), rinf, atol=1e-5)
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_frozen_phi_inside_interval_at_LV(fixed, seed):
+    """At L_V = Lip(f on hybrids ∪ A) the certified interval contains phi(f) (McShane), and L_V >= L_A."""
+    s = _setup(d=4, seed=30 + seed, fixed=fixed)
+    LA = anchor_lipschitz(s["A"], s["fA"], s["sigma"])
+    Z, active = hybrid_vertices(s["x"], s["r"])
+    fZ = _fa(Z)
+    LV = lipschitz_after_adding(LA, s["A"], s["fA"], Z, fZ, s["sigma"])
+    assert LV >= LA
+    phi = shapley_full(fZ, active, 4)
+    lo, hi, _ = pair_bounds_exact(s["x"], s["r"], s["A"], s["fA"], LV, s["sigma"])
+    assert torch.all(phi >= lo - TOL) and torch.all(phi <= hi + TOL)
+
+
+def test_linear_LA_le_LV_le_Ltrue():
+    s = _setup(d=4, seed=12)
+    w = torch.tensor([1.0, -0.5, 0.25, 2.0])
+    A = s["A"]
+    fA = A @ w
+    LA = anchor_lipschitz(A, fA, s["sigma"])
+    Z, _ = hybrid_vertices(s["x"], s["r"])
+    LV = lipschitz_after_adding(LA, A, fA, Z, Z @ w, s["sigma"])
+    Ltrue = float((w.abs() * s["sigma"]).max())
+    assert LA <= LV <= Ltrue * (1 + 1e-9)
+
+
+@pytest.mark.parametrize("L", [1.0, 1.1, 1.5, 2.0, 5.0, 100.0])
+def test_uv_counterexample_rho_closed_form(L):
+    """f = u + v, anchors {(0,0), (1,1)}: rho(L) = 1 - 1/L while rho_inf = 1 (upper bound only)."""
+    sig = torch.ones(2)
+    x, r = torch.tensor([1.0, 1.0]), torch.zeros(2)
+    A = torch.stack([r, x])
+    fA = A.sum(1)
+    assert abs(anchor_lipschitz(A, fA, sig) - 1.0) < 1e-12
+    lo, hi, _ = pair_bounds_exact(x, r, A, fA, L, sig)
+    assert torch.allclose((hi - lo) / (2 * L), torch.full((2,), 1 - 1 / L), atol=1e-12)
+    assert torch.allclose(geometric_rho_inf(x, r, A, sig), torch.ones(2), atol=1e-12)
+
+
+def test_mc_radius_scale_zero_gives_clamped_point_estimates():
+    """Negative-control mechanics: radius_scale = 0 -> bounds are the clamped stratified point estimates."""
+    s = _setup(d=4, seed=13)
+    fx = _fa(s["x"][None])[0]
+    res = mc_pair_bounds(s["x"], s["r"][None], s["C"], _fa(s["C"]), s["L"], s["sigma"], fx=fx,
+                         mode="domain", n_per_stratum=8, method="hoeffding", radius_scale=0.0,
+                         gen=torch.Generator().manual_seed(3))
+    Ld = s["L"] * (s["x"] - s["r"]).abs() / s["sigma"]
+    assert torch.allclose(res.lo[0], torch.maximum(res.a_hat[0], -Ld), atol=1e-12)
+    assert torch.allclose(res.hi[0], torch.minimum(res.b_hat[0], Ld), atol=1e-12)
+
+
+def test_shapley_full_matches_lp_shapley():
+    s = _setup(d=4, seed=14)
+    Z, active = hybrid_vertices(s["x"], s["r"])
+    lp = HypercubeLP(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
+    assert np.allclose(shapley_full(_fa(Z), active, 4).numpy(), lp.shapley(_fa(lp.Z)), atol=1e-12)
