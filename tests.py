@@ -164,3 +164,29 @@ def test_mc_is_exact_when_d_is_2(mode):
                          gen=torch.Generator().manual_seed(1))
     lo, hi, _ = pair_bounds_exact(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
     assert torch.allclose(res.lo[0], lo, atol=1e-10) and torch.allclose(res.hi[0], hi, atol=1e-10)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+@pytest.mark.parametrize("kappa", [1.0, 1.3, 2.0, 5.0])
+def test_lp_equals_pair_d2_endpoint_fixed(seed, kappa):
+    """Structural identity (regression test for envelopes + hypercube LP):
+    d = 2, endpoint-fixed anchors, weighted l1  =>  LP interval == pairwise interval (so Gamma_LP == B_pair),
+    with extra calibration anchors inside and far outside the hybrid box, for any feasible L."""
+    s = _setup(d=2, n=30, seed=seed, fixed=True)
+    far = 5.0 * torch.randn(10, 2, generator=torch.Generator().manual_seed(100 + seed))
+    A = torch.cat([s["A"], far])
+    fA = _fa(A)
+    L = kappa * anchor_lipschitz(A, fA, s["sigma"])
+    lo_p, hi_p, _ = (v.numpy() for v in pair_bounds_exact(s["x"], s["r"], A, fA, L, s["sigma"]))
+    lp = HypercubeLP(s["x"], s["r"], A, fA, L, s["sigma"])
+    lo_l, hi_l = lp.interval()
+    assert np.allclose(lo_l, lo_p, atol=TOL) and np.allclose(hi_l, hi_p, atol=TOL)
+    assert np.allclose(hi_l - lo_l, hi_p - lo_p, atol=TOL)
+    assert np.all(lp.cross_free_edges() == 0)
+
+
+def test_cross_free_edges_d2_domain():
+    """d = 2, domain mode (r not an anchor): exactly one useful cross edge per feature (r -- other hybrid)."""
+    s = _setup(d=2, seed=7)
+    lp = HypercubeLP(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
+    assert lp.cross_free_edges().tolist() == [1, 1]

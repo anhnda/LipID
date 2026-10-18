@@ -20,7 +20,7 @@ import torch
 from scipy.optimize import linprog
 
 from bounds import all_masks, shapley_from_vertex_values, shapley_weights, vertex_points
-from envelope import envelopes, lipschitz_violation, weighted_l1
+from envelope import dist_to_set, envelopes, lipschitz_violation, weighted_l1
 
 
 class Infeasible(RuntimeError):
@@ -150,6 +150,25 @@ class HypercubeLP:
         out = np.zeros(self.d)
         if self.m:
             out[self.active] = shapley_from_vertex_values(vertex_vals, self.m).cpu().numpy()
+        return out
+
+    def cross_free_edges(self, dtol: float = 1e-12) -> np.ndarray:
+        """For every feature i (full d): number of hypercube edges in directions j != i whose two
+        endpoints are both NON-anchor vertices. Only such edges can make Gamma_LP < B_pair:
+        B_pair equals the LP with box + direction-i edges, and an edge touching an anchor is
+        already implied by the box. (0 for inactive features.)"""
+        out = np.zeros(self.d, dtype=int)
+        if self.m == 0:
+            return out
+        free = (dist_to_set(self.Z, self.A, self.sigma) > dtol).cpu().numpy()
+        idx = np.arange(2 ** self.m)
+        per_dir = np.zeros(self.m, dtype=int)
+        for jj in range(self.m):
+            S = idx[(idx & (1 << jj)) == 0]
+            per_dir[jj] = int(np.sum(free[S] & free[S | (1 << jj)]))
+        total = int(per_dir.sum())
+        for jj, j in enumerate(self.active):
+            out[j] = total - per_dir[jj]
         return out
 
     # ------------------------------------------------- |phi| ranking certificates
