@@ -39,6 +39,17 @@ from hypercube_lp import HypercubeLP, Infeasible
 torch.set_default_dtype(torch.float64)
 
 
+def _json_default(o):
+    """Make numpy / torch scalars and arrays JSON-serializable (np.bool_, np.float64, tensors, ...)."""
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if torch.is_tensor(o):
+        return o.detach().cpu().tolist()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+
 # =============================================================================== config
 @dataclass
 class Config:
@@ -272,7 +283,7 @@ def run_deterministic(cfg: Config, out_dir: str) -> str:
                                     except Infeasible as e:
                                         rec["infeasible"], rec["note"] = True, str(e)
                                         n_inf += 1
-                                fh.write(json.dumps(rec) + "\n")
+                                fh.write(json.dumps(rec, default=_json_default) + "\n")
                     print(f"[det] d={d} rho={rho} nA={nA} {model:<11} kappa={kappa:<5} "
                           f"inst={n_tot} infeasible={n_inf} {time.perf_counter() - t_cfg:.1f}s", flush=True)
     return path
@@ -337,7 +348,7 @@ def run_mc_coverage(cfg: Config, out_dir: str) -> dict:
                 median_width_over_Bpair=float(np.median(ratios)) if ratios else None)
             print(f"[mc] {mode}/{method}: fails={fails}/{cfg.mc_runs} p={p:.3f}", flush=True)
     with open(os.path.join(out_dir, "mc_coverage.json"), "w") as fh:
-        json.dump(out, fh, indent=2)
+        json.dump(out, fh, indent=2, default=_json_default)
     return out
 
 
@@ -365,7 +376,7 @@ def stress_saturated(tol: float) -> dict:
             mism += int(cert != pred_cert)
             rows.append(dict(kappa=kappa, eps=float(eps), phi1_min=float(lo[0]), pred=pred,
                              certified=bool(cert)))
-    return dict(ok=(mism == 0 and verr <= tol), mismatches=mism, max_value_err=verr, rows=rows)
+    return dict(ok=bool(mism == 0 and verr <= tol), mismatches=int(mism), max_value_err=float(verr), rows=rows)
 
 
 def stress_sparse_reference(cfg: Config) -> dict:
@@ -473,7 +484,7 @@ def run_stress(cfg: Config, out_dir: str) -> dict:
                counterexample_2d=stress_counterexample_2d(cfg),
                stable_ood=stress_stable_ood(cfg))
     with open(os.path.join(out_dir, "stress.json"), "w") as fh:
-        json.dump(out, fh, indent=2)
+        json.dump(out, fh, indent=2, default=_json_default)
     for k in ("saturated", "sparse_reference", "counterexample_2d"):
         print(f"[stress] {k}: ok={out[k]['ok']}", flush=True)
     return out
@@ -509,7 +520,7 @@ def run_runtime(cfg: Config, out_dir: str) -> list:
                          hybrid_model_evals_fast=0))
         print(f"[rt] d={d}: pair {t_pair:.3f}s | LP {t_lp:.3f}s ({lp.n_lp} LPs) | MC {t_mc:.3f}s", flush=True)
     with open(os.path.join(out_dir, "runtime.json"), "w") as fh:
-        json.dump(rows, fh, indent=2)
+        json.dump(rows, fh, indent=2, default=_json_default)
     return rows
 
 
@@ -575,8 +586,8 @@ def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
         S["runtime"] = rt
     S["go"]["PHASE1_GO"] = all(S["go"].values())
     with open(os.path.join(out_dir, "summary.json"), "w") as fh:
-        json.dump(S, fh, indent=2)
-    print(json.dumps(S["go"], indent=2))
+        json.dump(S, fh, indent=2, default=_json_default)
+    print(json.dumps(S["go"], indent=2, default=_json_default))
     return S
 
 
@@ -592,7 +603,7 @@ def main():
     cfg.seed = args.seed
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "config.json"), "w") as fh:
-        json.dump(asdict(cfg), fh, indent=2)
+        json.dump(asdict(cfg), fh, indent=2, default=_json_default)
     stress = run_stress(cfg, args.out)
     rec_path = None if "det" in args.skip else run_deterministic(cfg, args.out)
     mc = None if "mc" in args.skip else run_mc_coverage(cfg, args.out)
