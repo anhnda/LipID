@@ -25,7 +25,7 @@ import json
 import os
 import time
 import zlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import torch
@@ -51,9 +51,31 @@ def _json_default(o):
 
 
 # =============================================================================== config
+PILOT_SEEDS = (0,)   # seeds already used by the pilot (--quick) run; never reused for the confirmatory grid
+
+AMENDMENT = {
+    "type": "post_pilot_pre_confirmatory_grid",
+    "reason": ("For d=2 with endpoint-fixed anchors and weighted L1 geometry, LP width equals the "
+               "pairwise bound by structural equivalence of the constraints: for feature i every "
+               "vertex lies in exactly one (z_S, z_{S+i}) pair, and every cross-direction edge "
+               "touches an anchored endpoint, so it is already encoded by the envelopes."),
+    "observed_before_amendment": "pilot GO flag only (lp_tightness=false); no tightness numbers",
+    "primary_lp_tightness_min_d": 3,
+    "median_width_ratio_threshold": 0.8,
+    "alternative_sign_rate_gain_pp": 10,
+    "report_by_dimension": True,
+    "report_by_anchor_mode": True,
+    "exclude_zero_denominator_from_ratios": True,
+    "secondary_analysis": ("features with >= 1 cross-direction hypercube edge joining two "
+                           "non-anchor hybrid vertices (necessary, not sufficient, for LP gain)"),
+    "confirmatory_seeds_disjoint_from_pilot": True,
+    "pilot_seeds": list(PILOT_SEEDS),
+}
+
+
 @dataclass
 class Config:
-    seed: int = 0
+    seed: int = 1                    # confirmatory default; the pilot used seed 0
     dims: tuple = (2, 3, 4, 5)
     rhos: tuple = (0.0, 0.6, 0.9, 0.99)
     n_anchor: tuple = (16, 64, 256)
@@ -87,12 +109,15 @@ class Config:
     go_lp_ratio: float = 0.8        # median Gamma_LP / B_pair <= this ...
     go_lp_sign_gain: float = 0.10   # ... or certified-sign rate gain (LP - pair) >= this
     go_mc_pvalue: float = 0.01      # binomial test of failure rate > eta must NOT reject at this level
+    go_lp_min_d: int = 3            # amendment: LP-tightness criterion evaluated on d >= 3 only
+    run_kind: str = "confirmatory"
+    amendment: dict = field(default_factory=lambda: dict(AMENDMENT))
 
     @staticmethod
     def quick() -> "Config":
-        return Config(dims=(2, 3), rhos=(0.0, 0.9), n_anchor=(32,), models=("linear", "fa"),
+        return Config(seed=0, dims=(2, 3), rhos=(0.0, 0.9), n_anchor=(32,), models=("linear", "fa"),
                       kappas=(1.0, 2.0), n_eval_x=2, refs_per_x=2, n_members=20,
-                      mc_runs=40, rt_dims=(4, 6))
+                      mc_runs=40, rt_dims=(4, 6), run_kind="pilot")
 
 
 # ============================================================================== helpers
@@ -225,6 +250,7 @@ def evaluate_instance(x, r, A, fAv, L, sigma, f, cfg: Config, gen: torch.Generat
 
     return dict(
         m=lp.m, n_lp=lp.n_lp, t_pair=t_pair, t_lp=t_lp,
+        cross_free_edges=lp.cross_free_edges().tolist(),
         delta=delta.tolist(), twoLd=twoLd.tolist(), B_pair=B.tolist(), G_lp=G.tolist(), D=D.tolist(),
         lo_pair=lo_p.tolist(), hi_pair=hi_p.tolist(), lo_lp=lo_l.tolist(), hi_lp=hi_l.tolist(),
         phi_f=phi_f.tolist(), sign_lp=sg_lp.tolist(), sign_pair=sg_pair.tolist(), topk=topk,
@@ -525,30 +551,48 @@ def run_runtime(cfg: Config, out_dir: str) -> list:
 
 
 # ============================================================================== summary
-def _tightness(recs: list) -> dict:
-    ratios, n_act, c_lp, c_pair, n_topk, c_topk = [], 0, 0, 0, 0, 0
+def _tightness(recs: list, feature_filter=None) -> dict:
+    """LP vs pairwise tightness over active features (optionally filtered per (record, feature)).
+    Ratios exclude B_pair = 0 (zero denominator); those cases are counted separately."""
+    ratios, n_act, n_zero, c_lp, c_pair, n_topk, c_topk = [], 0, 0, 0, 0, 0, 0
     for r in recs:
         for j in range(r["d"]):
             if r["delta"][j] <= 0.0:
                 continue
+            if feature_filter is not None and not feature_filter(r, j):
+                continue
             n_act += 1
             if r["B_pair"][j] > 1e-9:
                 ratios.append(r["G_lp"][j] / r["B_pair"][j])
+            else:
+                n_zero += 1
             c_lp += int(r["sign_lp"][j] != 0)
             c_pair += int(r["sign_pair"][j] != 0)
         if r.get("topk"):
             n_topk += 1
             c_topk += int(r["topk"]["certified"])
-    return dict(n_features=n_act,
+    q = np.quantile(ratios, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist() if ratios else None
+    return dict(n_features=n_act, n_zero_denominator=n_zero,
                 median_G_over_B=float(np.median(ratios)) if ratios else None,
+                quantiles_G_over_B_10_25_50_75_90=q,
+                frac_ratio_below_0_99=float(np.mean(np.array(ratios) < 0.99)) if ratios else None,
                 cert_sign_rate_lp=c_lp / n_act if n_act else None,
                 cert_sign_rate_pair=c_pair / n_act if n_act else None,
                 cert_sign_gain=(c_lp - c_pair) / n_act if n_act else None,
                 cert_topk_rate=c_topk / n_topk if n_topk else None)
 
 
+def _lp_criterion(t: dict, cfg: Config) -> bool:
+    return bool((t["median_G_over_B"] is not None and t["median_G_over_B"] <= cfg.go_lp_ratio)
+                or (t["cert_sign_gain"] is not None and t["cert_sign_gain"] >= cfg.go_lp_sign_gain))
+
+
+def _has_cross_free_edge(r: dict, j: int) -> bool:
+    return r.get("cross_free_edges", [0] * r["d"])[j] > 0
+
+
 def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
-    S: dict = dict(go={})
+    S: dict = dict(run_kind=cfg.run_kind, seed=cfg.seed, amendment=cfg.amendment, go={})
     det_ok = all(stress[k]["ok"] for k in ("saturated", "sparse_reference", "counterexample_2d"))
     lp_ok = None
     if rec_path:
@@ -566,13 +610,26 @@ def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
         S["deterministic"]["topk_contra"] = sum(r["topk_contra"] for r in feas)
         det_ok = det_ok and all(S["deterministic"][k]["n_over_tol"] == 0 for k in fields) \
             and S["deterministic"]["sign_contra"] == 0 and S["deterministic"]["topk_contra"] == 0
-        S["tightness_overall"] = _tightness(feas)
+        # structural identity (theorem): d = 2, endpoint-fixed  =>  Gamma_LP == B_pair exactly
+        d2f = [r for r in feas if r["d"] == 2 and r["mode"] == "fixed"]
+        id_gap = max((abs(g - b) for r in d2f for g, b in zip(r["G_lp"], r["B_pair"])), default=0.0)
+        S["deterministic"]["d2_fixed_identity"] = dict(n_instances=len(d2f), max_abs_gap=id_gap,
+                                                       ok=bool(id_gap <= cfg.tol))
+        det_ok = det_ok and S["deterministic"]["d2_fixed_identity"]["ok"]
+
+        # tightness: primary (amended), by dimension, by dimension x mode, secondary, legacy pooled
+        primary = [r for r in feas if r["d"] >= cfg.go_lp_min_d]
+        S["tightness_primary_d_ge_min"] = _tightness(primary)
+        S["tightness_by_d"] = {f"d={d}": _tightness([r for r in feas if r["d"] == d]) for d in cfg.dims}
+        S["tightness_by_d_mode"] = {f"d={d}/{m}": _tightness([r for r in feas if r["d"] == d and r["mode"] == m])
+                                    for d in cfg.dims for m in ("domain", "fixed")}
+        S["tightness_secondary_cross_free_edge"] = _tightness(feas, _has_cross_free_edge)
         S["tightness_by"] = {f"{m}/kappa={k}/nA={n}": _tightness(
-            [r for r in feas if r["mode"] == m and r["kappa"] == k and r["n_anchor"] == n])
+            [r for r in primary if r["mode"] == m and r["kappa"] == k and r["n_anchor"] == n])
             for m in ("domain", "fixed") for k in cfg.kappas for n in cfg.n_anchor}
-        t = S["tightness_overall"]
-        lp_ok = bool((t["median_G_over_B"] is not None and t["median_G_over_B"] <= cfg.go_lp_ratio)
-                     or (t["cert_sign_gain"] is not None and t["cert_sign_gain"] >= cfg.go_lp_sign_gain))
+        S["tightness_legacy_pooled_all_d"] = _tightness(feas)   # original (pre-amendment) criterion, report only
+        lp_ok = _lp_criterion(S["tightness_primary_d_ge_min"], cfg)
+        S["lp_tightness_legacy_pooled_pass"] = _lp_criterion(S["tightness_legacy_pooled_all_d"], cfg)
         S["transfer"] = dict(  # empirical, not a theorem check
             frozen_phi_outside_rate=float(np.mean([r["transfer_out"] > cfg.tol for r in feas])) if feas else None,
             envelope_violation_rate=float(np.mean([r["VL"] > cfg.tol for r in feas])) if feas else None)
@@ -596,11 +653,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="phase1_out")
     ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: 0 for --quick (pilot), 1 for the confirmatory grid")
     ap.add_argument("--skip", nargs="*", default=[], choices=["det", "mc", "runtime"])
     args = ap.parse_args()
     cfg = Config.quick() if args.quick else Config()
-    cfg.seed = args.seed
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if cfg.run_kind == "confirmatory" and cfg.seed in PILOT_SEEDS:
+        ap.error(f"seed {cfg.seed} was used by the pilot; the confirmatory grid needs a fresh seed "
+                 f"(amendment: confirmatory_seeds_disjoint_from_pilot)")
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "config.json"), "w") as fh:
         json.dump(asdict(cfg), fh, indent=2, default=_json_default)
