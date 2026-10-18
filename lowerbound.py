@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-lowerbound.py — check geometric lower bounds on the normalized AIW on an EXISTING run.
+lowerbound.py (v3) — check lower bounds on the normalized AIW on an EXISTING run.
 No LP: the data are regenerated with the same generator keys as phase1.run_optimistic, anchor values are
 recomputed with the same model functions (no hybrid evaluations), and rho(L) is read from optimistic.jsonl.
 
-Per active feature i, per coalition S (not containing i), z+ = z_{S+i}, z- = z_S, delta = delta_i:
-  global bound (kappa = L / L_A(A) = L / L_min):
-      s_S      = (d(z+, A) + d(z-, A)) / delta                         (NOT clipped)
-      rho_low  = sum_S w_S [min(1, (1 - 1/k) s_S - 1/k)]_+
-      p_sat    = sum_S w_S 1{ s_S >= (k + 1)/(k - 1) }
-  pair-local bound (lambda_uv = |f(u) - f(v)| / d(u, v), R_uv = d(z+, u) + d(z-, v)):
-      T_S      = min_{u,v in A} [ L R_uv - lambda_uv (R_uv + delta) ]
-      rho_loc  = sum_S w_S [min(1, T_S / (L delta))]_+
-  geometric limit:
-      rho_inf  = sum_S w_S min(1, s_S)                                  (must equal the stored rho_inf)
-Theory (checked here): rho_low <= rho_loc <= rho(L) <= rho_inf.
+Per active feature i, per coalition S (not containing i), z+ = z_{S+i}, z- = z_S, delta = delta_i,
+R_uv = d(z+, u) + d(z-, v) over ordered anchor pairs, d_uv = d(u, v), dF_uv = |f(u) - f(v)|, kappa = L / L_min.
+
+Exact (Prop. 3):  B = min_{u,v} [ f(u) - f(v) + L R_uv ]   (signed)  -> rho(L), read from optimistic.jsonl.
+Every bound below is  rho_X = sum_S w_S clamp(T_X / (L delta), 0, 1)  with T_X <= B (and <= -A):
+  box  (sign-blind):            T = min [ L R_uv - dF_uv ]                     uses |f(u)-f(v)|, no triangle ineq.
+  loc  (v2, triangle-relaxed):  T = min [ L R_uv - lambda_uv (R_uv + delta) ]   lambda_uv = dF_uv / d_uv
+  det  (pure geometry + kappa): T = min [ L R_uv - L_min d_uv ]                 uses only lambda_uv <= L_min
+  low  (global, closed form):   rho_low = sum_S w_S [min(1, (1 - 1/k) s_S - 1/k)]_+,  s_S = (q+ + q-)/delta
+  inf  (geometric limit):       rho_inf = sum_S w_S min(1, s_S)                 (must equal the stored rho_inf)
+Theory (checked here):  low <= det <= box,  low <= loc <= box,  box <= rho(L) <= inf.
+NOTE: loc is identically 0 at kappa = 1 (the steepest pair gives T <= -L delta); box and det are not.
+Gap rho - box = information carried only by the SIGN of f(u) - f(v).
 
     python lowerbound.py phase1_out phase1_seed2 phase1_seed3 phase1_seed4 [--device cuda] [--no-local]
 Writes <run>/lowerbound_summary.json and prints tables.
@@ -34,6 +36,7 @@ from envelope import weighted_l1
 S_THRESH = (1.0, 3.0, 5.0, 2.18 / 0.18)   # saturation thresholds for kappa = inf, 2, 1.5, 1.18
 LEVELS = ("Lmin", "LV", "Ltrue")
 MODES = ("domain", "fixed")
+LOCAL = ("det", "loc", "box")
 
 
 def rho_low(w, s, k):
@@ -105,7 +108,7 @@ def process(run, device, use_local):
                                 if row is None:
                                     n_missing += 1
                                     continue
-                                lamR = {}
+                                dF, lamR = None, {}
                                 if use_local:
                                     fC, fX, fR = fv[model]
                                     fA = torch.cat([fC, fX[xi:xi + 1]]) if mode == "domain" else \
@@ -113,8 +116,7 @@ def process(run, device, use_local):
                                     dF = (fA[:, None] - fA[None, :]).abs()
                                     Lam = torch.where(DA > 1e-12, dF / DA.clamp_min(1e-12), torch.zeros_like(DA))
                                     for j in row["active"]:
-                                        R = feats[j][3]
-                                        lamR[j] = Lam[None] * (R + delta[j])
+                                        lamR[j] = Lam[None] * (feats[j][3] + delta[j])
                                 for lev in LEVELS:
                                     e = row["levels"].get(lev)
                                     if not e:
@@ -125,14 +127,20 @@ def process(run, device, use_local):
                                         w, wn, sn, R = feats[j]
                                         ri = float((wn * np.minimum(1.0, sn)).sum())
                                         regen_err = max(regen_err, abs(ri - row["rho_inf"][j]))
-                                        loc = None
+                                        rec = dict(d=d, model=model, mode=mode, lev=lev, k=k, rho=e["rho"][j],
+                                                   low=rho_low(wn, sn, k), inf=ri, p=p_sat(wn, sn, k),
+                                                   det=None, loc=None, box=None)
                                         if use_local:
-                                            T = (L * R - lamR[j]).amin(dim=(1, 2))
-                                            val = (T / (L * delta[j])).clamp(min=0.0, max=1.0)
-                                            loc = float((w * val).sum())
-                                        recs.append(dict(d=d, model=model, mode=mode, lev=lev, k=k,
-                                                         rho=e["rho"][j], low=rho_low(wn, sn, k), loc=loc,
-                                                         inf=ri, p=p_sat(wn, sn, k)))
+                                            Ld = L * delta[j]
+                                            LR = L * R
+
+                                            def lb(T):
+                                                return float((w * (T / Ld).clamp(min=0.0, max=1.0)).sum())
+
+                                            rec["loc"] = lb((LR - lamR[j]).amin(dim=(1, 2)))
+                                            rec["box"] = lb((LR - dF[None]).amin(dim=(1, 2)))
+                                            rec["det"] = lb((LR - row["L_min"] * DA[None]).amin(dim=(1, 2)))
+                                        recs.append(rec)
     return cfg, recs, geo, regen_err, n_missing
 
 
@@ -143,23 +151,24 @@ def table(recs, keyf, tol):
     out = {}
     for key in sorted(G, key=lambda t: tuple(str(v) for v in t)):
         rs = G[key]
-        rho = np.array([r["rho"] for r in rs])
-        low = np.array([r["low"] for r in rs])
-        inf_ = np.array([r["inf"] for r in rs])
-        p = np.array([r["p"] for r in rs])
-        kap = np.array([r["k"] for r in rs])
+        a = {c: np.array([r[c] for r in rs]) for c in ("rho", "low", "inf", "p", "k")}
+        rho, low = a["rho"], a["low"]
         sat = rho > 0.8                       # non-informative feature-instances
+        expl = (lambda b: float(np.mean(b[sat] > 0.8)) if sat.any() else None)
         e = dict(n=len(rs),
-                 viol_low=int(np.sum(rho < low - tol)), viol_inf=int(np.sum(rho > inf_ + tol)),
-                 med_kappa=float(np.median(kap)), med_low=float(np.median(low)), med_rho=float(np.median(rho)),
-                 med_inf=float(np.median(inf_)), med_p_sat=float(np.median(p)),
-                 explained_low=float(np.mean(low[sat] > 0.8)) if sat.any() else None)
+                 viol_low=int(np.sum(rho < low - tol)), viol_inf=int(np.sum(rho > a["inf"] + tol)),
+                 med_kappa=float(np.median(a["k"])), med_low=float(np.median(low)), med_rho=float(np.median(rho)),
+                 med_inf=float(np.median(a["inf"])), med_p_sat=float(np.median(a["p"])),
+                 explained_low=expl(low))
         if rs[0]["loc"] is not None:
-            loc = np.array([r["loc"] for r in rs])
-            e.update(viol_loc=int(np.sum(rho < loc - tol)),          # theorem: rho >= rho_loc
-                     viol_order=int(np.sum(low > loc + tol)),        # theorem: rho_loc >= rho_low
-                     med_loc=float(np.median(loc)), med_gap_loc=float(np.median(rho - loc)),
-                     explained_loc=float(np.mean(loc[sat] > 0.8)) if sat.any() else None)
+            b = {c: np.array([r[c] for r in rs]) for c in LOCAL}
+            det, loc, box = b["det"], b["loc"], b["box"]
+            order = (low > det + tol) | (low > loc + tol) | (det > box + tol) | (loc > box + tol)
+            e.update(viol_det=int(np.sum(rho < det - tol)), viol_loc=int(np.sum(rho < loc - tol)),
+                     viol_box=int(np.sum(rho < box - tol)), viol_order=int(np.sum(order)),
+                     med_det=float(np.median(det)), med_loc=float(np.median(loc)), med_box=float(np.median(box)),
+                     med_gap_loc=float(np.median(rho - loc)), med_gap_box=float(np.median(rho - box)),
+                     explained_det=expl(det), explained_loc=expl(loc), explained_box=expl(box))
         out["/".join(str(v) for v in key)] = e
     return out
 
@@ -179,8 +188,8 @@ def fmt(x):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("runs", nargs="+")
-    ap.add_argument("--device", default="cpu", help="cpu | cuda (pair-local bound is much faster on cuda)")
-    ap.add_argument("--no-local", action="store_true", help="skip the pair-local bound (global bound only)")
+    ap.add_argument("--device", default="cpu", help="cpu | cuda (pair bounds are much faster on cuda)")
+    ap.add_argument("--no-local", action="store_true", help="skip det/loc/box (global bound only)")
     args = ap.parse_args()
     for run in args.runs:
         cfg, recs, geo, regen_err, n_missing = process(run, args.device, not args.no_local)
@@ -193,17 +202,21 @@ def main():
         with open(os.path.join(run, "lowerbound_summary.json"), "w") as fh:
             json.dump(res, fh, indent=2)
         print(f"\n=== {run} (seed {cfg['seed']})  regen_err={regen_err:.2e}  missing={n_missing}")
-        print("d/level | n | viol low/inf/loc/order | med k | med low | med loc | med rho | med inf | "
-              "expl_low | expl_loc")
+        print("d/level | n | viol low/det/loc/box/inf/order | med k | med low/det/loc/box/rho | "
+              "expl low/det/loc/box")
         for k, v in res["by_d_level"].items():
-            print(f"{k} | {v['n']} | {v['viol_low']}/{v['viol_inf']}/{v.get('viol_loc', '-')}/"
-                  f"{v.get('viol_order', '-')} | {v['med_kappa']:.3f} | {v['med_low']:.3f} | "
-                  f"{fmt(v.get('med_loc'))} | {v['med_rho']:.3f} | {v['med_inf']:.3f} | "
-                  f"{fmt(v['explained_low'])} | {fmt(v.get('explained_loc'))}")
-        print("by model (d=4,5; level LV, Ltrue): med loc | med rho | expl_loc")
+            viol = "/".join(str(v.get(c, "-")) for c in
+                            ("viol_low", "viol_det", "viol_loc", "viol_box", "viol_inf", "viol_order"))
+            med = "/".join(fmt(v.get(c)) for c in ("med_low", "med_det", "med_loc", "med_box", "med_rho"))
+            ex = "/".join(fmt(v.get(c)) for c in ("explained_low", "explained_det", "explained_loc",
+                                                  "explained_box"))
+            print(f"{k} | {v['n']} | {viol} | {v['med_kappa']:.3f} | {med} | {ex}")
+        print("by model (d=4,5): med k | med det/loc/box/rho | expl det/loc/box")
         for k, v in res["by_d_model_level"].items():
-            if k.split("/")[0] in ("4", "5") and k.split("/")[-1] in ("LV", "Ltrue"):
-                print(f"  {k} | {fmt(v.get('med_loc'))} | {v['med_rho']:.3f} | {fmt(v.get('explained_loc'))}")
+            if k.split("/")[0] in ("4", "5"):
+                med = "/".join(fmt(v.get(c)) for c in ("med_det", "med_loc", "med_box", "med_rho"))
+                ex = "/".join(fmt(v.get(c)) for c in ("explained_det", "explained_loc", "explained_box"))
+                print(f"  {k} | {v['med_kappa']:.3f} | {med} | {ex}")
         print("geometry: Shapley-weight mass with s_S >= 1 / 3 / 5 / 12.1")
         for k, v in res["geometry_by_d_mode"].items():
             print(k, " ".join(f"{x:.3f}" for x in v.values()))
