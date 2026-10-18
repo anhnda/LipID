@@ -135,6 +135,18 @@ AMENDMENT_V3 = {
     "pilot_seeds": list(PILOT_SEEDS),
 }
 
+AMENDMENT_V3_1 = {
+    "type": "post_seed1_pre_replication_seeds",
+    "data_driven": True,
+    "observed_before_amendment": ("seed 1 under v3 rule: d=2 S3, d=3 S2, d=4 S1, d=5 S1. At d=3 the rho part held at "
+                                  "both levels (0.59 at L_min, 0.52 at L_V >= 0.5) while the sign part failed at "
+                                  "BOTH levels (0.188 at L_min, 0.134 at L_V < 0.2): the v3 rule tested only rho "
+                                  "at L_min for S2, so the S2 label did not mean 'lost to model roughness'"),
+    "change": "S2 iff U(L_min) and not U(L_V), with the SAME criterion U used for S3; thresholds unchanged",
+    "kept": "v3 labels reported as verdict_v3_legacy",
+    "binding_from": "replication seeds (2, 3, 4) onward; seed 1 is not a blind test of either rule",
+}
+
 STRESS_GATED = ("saturated", "sparse_reference", "counterexample_2d", "uv_counterexample")
 TECH_GO_KEYS = ("stress_checks", "grid_correctness", "optimistic_theorem_checks",
                 "mc_coverage", "mc_non_vacuous", "mc_negative_control_detected")
@@ -191,7 +203,7 @@ class Config:
     rho_informative: float = 0.9    # report: fraction of features with rho_i < this
     run_kind: str = "confirmatory"
     amendment: dict = field(default_factory=lambda: {"v1": dict(AMENDMENT), "v2": dict(AMENDMENT_V2),
-                                                     "v3": dict(AMENDMENT_V3)})
+                                                     "v3": dict(AMENDMENT_V3), "v3_1": dict(AMENDMENT_V3_1)})
 
     @staticmethod
     def quick() -> "Config":
@@ -1053,27 +1065,34 @@ def _opt_checks(rows: list, cfg: Config) -> dict:
 
 
 def _scientific(opt_by_d: dict, cfg: Config) -> dict:
-    """Pre-registered scenarios per d (thresholds from config.json, fixed before the run):
-      S3 valid_and_useful        : frac(rho(L_V) <= target) >= min_frac AND cert-sign rate at L_V >= min_sign_rate
-      S2 lost_to_model_roughness : not S3, but frac(rho(L_min) <= target) >= min_frac
-      S1 not_identifiable        : otherwise — even the optimistic ceiling at L_min fails"""
+    """Scenarios per d (thresholds from config.json, fixed before the run). Rule v3.1 — ONE criterion
+    U(L) = [frac(rho(L) <= target) >= min_frac AND cert-sign rate at L >= min_sign_rate] at both levels:
+      S3 valid_and_useful        : U(L_V)
+      S2 lost_to_model_roughness : U(L_min) and not U(L_V)
+      S1 not_identifiable        : not U(L_min) — even the optimistic ceiling fails
+    The v3 rule (S2 checked only the rho part at L_min) is kept as 'verdict_v3_legacy'; see AMENDMENT_V3_1."""
     th = dict(rho_target=cfg.sci_rho_target, min_frac=cfg.sci_min_frac, min_sign_rate=cfg.sci_min_sign_rate)
     if any(v is None for v in th.values()):
         return dict(status="thresholds_not_registered", thresholds=th,
                     note="pass --sci-rho-target, --sci-min-frac and --sci-min-sign-rate BEFORE the run")
-    verdict = {}
+
+    def useful(e):
+        return bool(e) and (e.get("rho_frac_le_target") or 0.0) >= cfg.sci_min_frac \
+            and (e.get("cert_sign_rate") or 0.0) >= cfg.sci_min_sign_rate
+
+    verdict, legacy = {}, {}
     for key, g in opt_by_d.items():
         lmin, lv = g.get("Lmin"), g.get("LV")
-        if not lmin or not lv or lv.get("rho_frac_le_target") is None:
-            verdict[key] = "no_data"
-        elif (lv["rho_frac_le_target"] >= cfg.sci_min_frac
-              and (lv["cert_sign_rate"] or 0.0) >= cfg.sci_min_sign_rate):
-            verdict[key] = "S3_valid_and_useful"
-        elif (lmin.get("rho_frac_le_target") or 0.0) >= cfg.sci_min_frac:
-            verdict[key] = "S2_lost_to_model_roughness"
-        else:
-            verdict[key] = "S1_not_identifiable"
-    return dict(status="evaluated", thresholds=th, verdict_by_d=verdict)
+        if not lmin or not lv:
+            verdict[key] = legacy[key] = "no_data"
+            continue
+        verdict[key] = ("S3_valid_and_useful" if useful(lv) else
+                        "S2_lost_to_model_roughness" if useful(lmin) else "S1_not_identifiable")
+        legacy[key] = ("S3_valid_and_useful" if useful(lv) else
+                       "S2_lost_to_model_roughness" if (lmin.get("rho_frac_le_target") or 0.0) >= cfg.sci_min_frac
+                       else "S1_not_identifiable")
+    return dict(status="evaluated", thresholds=th, rule="v3.1: S2 iff U(L_min) and not U(L_V)",
+                verdict_by_d=verdict, verdict_v3_legacy=legacy)
 
 
 def summarize(cfg: Config, out_dir: str, rec_path, opt_path, mc, stress, rt) -> dict:
