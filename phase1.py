@@ -70,6 +70,29 @@ AMENDMENT = {
                            "non-anchor hybrid vertices (necessary, not sufficient, for LP gain)"),
     "confirmatory_seeds_disjoint_from_pilot": True,
     "pilot_seeds": list(PILOT_SEEDS),
+    "status": "superseded by v2 (its premise — LP gain via cross-direction free edges — is false)",
+}
+
+AMENDMENT_V2 = {
+    "type": "post_pilot_pre_confirmatory_grid",
+    "data_driven": True,
+    "observed_before_amendment": ("pilot 2 numbers: Gamma_LP / B_pair = 1 (to 1e-16) in every instance, "
+                                  "all d and modes, incl. features with cross-direction free edges; "
+                                  "MC width / B_pair = 1; certified-sign rates 11-39%, top-k 1.6%"),
+    "finding": ("Proposition (bounds.py): under weighted l1 the pairwise interval equals the exact class "
+                "interval for every feature, any anchor set, any L >= L_A, any non-negative semivalue. "
+                "Discovered from pilot data, then proved by explicit construction."),
+    "lp_interval_tightness_criterion": "void_by_theorem (ratio == 1 identically); not counted as pass or fail",
+    "theorem_check": "max |interval_LP - interval_pair| over all feasible instances <= tol (deterministic)",
+    "new_lp_question": ("joint certificates: among ordered pairs (i above j by |phi_f|, both active), "
+                        "rate certified by exact LP (<= 4 LPs) minus rate certified by interval separation alone"),
+    "lp_retention_threshold_pp": 10,
+    "phase1_go_definition": ("deterministic correctness AND MC coverage. The LP question decides whether the LP "
+                             "stays in the method; it no longer gates Phase 1 (failing it = drop LP, not the framework)"),
+    "anchor_informativeness_report": ("rho_i = B_pair_i / (2 L delta_i): quantiles and fraction < 0.9 by d, n_anchor, "
+                                      "kappa, mode — report only, the key usefulness signal for Phase 2"),
+    "confirmatory_seeds_disjoint_from_pilot": True,
+    "pilot_seeds": list(PILOT_SEEDS),
 }
 
 
@@ -109,9 +132,11 @@ class Config:
     go_lp_ratio: float = 0.8        # median Gamma_LP / B_pair <= this ...
     go_lp_sign_gain: float = 0.10   # ... or certified-sign rate gain (LP - pair) >= this
     go_mc_pvalue: float = 0.01      # binomial test of failure rate > eta must NOT reject at this level
-    go_lp_min_d: int = 3            # amendment: LP-tightness criterion evaluated on d >= 3 only
+    go_lp_min_d: int = 3            # amendment v1 (superseded): kept only for the legacy report
+    go_lp_joint_gain: float = 0.10  # amendment v2: LP kept iff joint-certificate rate gain >= this
+    rho_informative: float = 0.9    # report: fraction of features with rho_i < this
     run_kind: str = "confirmatory"
-    amendment: dict = field(default_factory=lambda: dict(AMENDMENT))
+    amendment: dict = field(default_factory=lambda: {"v1": dict(AMENDMENT), "v2": dict(AMENDMENT_V2)})
 
     @staticmethod
     def quick() -> "Config":
@@ -214,12 +239,47 @@ def evaluate_instance(x, r, A, fAv, L, sigma, f, cfg: Config, gen: torch.Generat
         topk = dict(T=T, certified=bool(res["certified"]), n_lp=int(res["n_lp"]),
                     n_fail=len(res["fails"]))
 
+    # Proposition check: LP interval == pairwise interval (both directions, not only containment)
+    exact_gap = max(float(np.max(np.abs(lo_l - lo_p), initial=0.0)),
+                    float(np.max(np.abs(hi_l - hi_p), initial=0.0)))
+
+    # joint certificates (amendment v2): ordered pairs i above j by |phi_f|, both active
+    act = set(lp.active)
+    order = [int(v) for v in np.argsort(-np.abs(phi_f), kind="stable") if int(v) in act]
+
+    def _min_abs(k):
+        return 0.0 if lo_l[k] <= 0.0 <= hi_l[k] else min(abs(lo_l[k]), abs(hi_l[k]))
+
+    def _max_abs(k):
+        return max(abs(lo_l[k]), abs(hi_l[k]))
+
+    n_pairs = n_cert_int = n_cert_lp_only = 0
+    joint_lb_viol = 0.0
+    cert_pairs = []
+    n_lp0 = lp.n_lp
+    for a_ in range(len(order)):
+        for b_ in range(a_ + 1, len(order)):
+            i, j = order[a_], order[b_]
+            pc = lp.abs_margin(i, j, tol)
+            n_pairs += 1
+            if pc.kind == "lower":
+                n_cert_int += 1
+                cert_pairs.append((i, j))
+            elif pc.kind == "exact":
+                # exact LP margin can never be below the interval-separation lower bound
+                joint_lb_viol = max(joint_lb_viol, (_min_abs(i) - _max_abs(j)) - pc.margin)
+                if pc.certified:
+                    n_cert_lp_only += 1
+                    cert_pairs.append((i, j))
+    joint = dict(n_pairs=n_pairs, cert_interval=n_cert_int, cert_lp_only=n_cert_lp_only,
+                 n_lp_calls=lp.n_lp - n_lp0)
+
     # members of F_L(A): ell, h, then clamped random Lipschitz functions
     center = 0.5 * (x + r)
     scale = 0.5 + 0.5 * float(lp.delta.mean())
     f_mu, f_sd = float(fAv.mean()), float(fAv.std())
     mv_lp = mv_pair = lip_viol = 0.0
-    sign_contra = topk_contra = 0
+    sign_contra = topk_contra = joint_contra = 0
     for mi in range(cfg.n_members):
         if mi == 0:
             vals = lp.ell
@@ -245,6 +305,10 @@ def evaluate_instance(x, r, A, fAv, L, sigma, f, cfg: Config, gen: torch.Generat
             outside = [j for j in range(d) if j not in Ts]
             if outside and ab[Ts].min() < ab[outside].max() - tol:
                 topk_contra += 1
+        if cert_pairs:
+            ab = np.abs(phi_g)
+            if any(ab[i] < ab[j] - tol for i, j in cert_pairs):
+                joint_contra += 1
 
     sol_viol = lp.verify_solutions(all_pairs=lp.m <= 12)
 
@@ -256,7 +320,8 @@ def evaluate_instance(x, r, A, fAv, L, sigma, f, cfg: Config, gen: torch.Generat
         phi_f=phi_f.tolist(), sign_lp=sg_lp.tolist(), sign_pair=sg_pair.tolist(), topk=topk,
         viol_chain=viol_chain, viol_contain=viol_contain, member_viol_lp=mv_lp,
         member_viol_pair=mv_pair, lip_viol=lip_viol, sol_viol=sol_viol,
-        sign_contra=sign_contra, topk_contra=topk_contra,
+        sign_contra=sign_contra, topk_contra=topk_contra, joint_contra=joint_contra,
+        exact_gap=exact_gap, joint_lb_viol=max(0.0, joint_lb_viol), joint=joint,
         VL=VL, transfer_out=transfer_out,
     )
 
@@ -356,6 +421,12 @@ def run_mc_coverage(cfg: Config, out_dir: str) -> dict:
         lo_ex, hi_ex = torch.stack(lo_ex), torch.stack(hi_ex)
         B_ex = hi_ex - lo_ex
         mask = B_ex > 1e-9
+        twoLd_ex = 2.0 * L * (x.unsqueeze(0) - R).abs() / sigma
+        act_ex = twoLd_ex > 0
+        rho_ex = (B_ex[act_ex] / twoLd_ex[act_ex]).cpu().numpy()
+        out[f"rho_exact_{mode}"] = dict(
+            quantiles_10_25_50_75_90=np.quantile(rho_ex, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist(),
+            frac_below=float(np.mean(rho_ex < cfg.rho_informative)))
         for method in ("hoeffding", "bernstein", "best"):
             fails, ratios = 0, []
             for run in range(cfg.mc_runs):
@@ -591,10 +662,33 @@ def _has_cross_free_edge(r: dict, j: int) -> bool:
     return r.get("cross_free_edges", [0] * r["d"])[j] > 0
 
 
+def _joint(recs: list, cfg: Config) -> dict:
+    """Amendment v2: joint |phi_i| > |phi_j| certificates, interval separation vs exact LP."""
+    n = sum(r["joint"]["n_pairs"] for r in recs)
+    ci = sum(r["joint"]["cert_interval"] for r in recs)
+    cl = sum(r["joint"]["cert_lp_only"] for r in recs)
+    calls = sum(r["joint"]["n_lp_calls"] for r in recs)
+    gain = cl / n if n else None
+    return dict(n_pairs=n, rate_interval=ci / n if n else None, rate_lp=(ci + cl) / n if n else None,
+                gain_lp_minus_interval=gain, lp_calls_per_pair=calls / n if n else None,
+                lp_retained=bool(gain is not None and gain >= cfg.go_lp_joint_gain))
+
+
+def _rho(recs: list, cfg: Config) -> dict:
+    """Anchor informativeness rho_i = B_pair_i / (2 L delta_i) over active features (1 = anchors add nothing)."""
+    v = [r["B_pair"][j] / r["twoLd"][j] for r in recs for j in range(r["d"]) if r["twoLd"][j] > 0]
+    if not v:
+        return dict(n_features=0)
+    v = np.asarray(v)
+    return dict(n_features=int(v.size),
+                quantiles_10_25_50_75_90=np.quantile(v, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist(),
+                frac_below=float(np.mean(v < cfg.rho_informative)), threshold=cfg.rho_informative)
+
+
 def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
     S: dict = dict(run_kind=cfg.run_kind, seed=cfg.seed, amendment=cfg.amendment, go={})
     det_ok = all(stress[k]["ok"] for k in ("saturated", "sparse_reference", "counterexample_2d"))
-    lp_ok = None
+    joint_all = None
     if rec_path:
         with open(rec_path) as fh:
             recs = [json.loads(line) for line in fh]
@@ -606,42 +700,59 @@ def summarize(cfg: Config, out_dir: str, rec_path, mc, stress, rt) -> dict:
         fields = ["viol_chain", "viol_contain", "member_viol_lp", "member_viol_pair", "lip_viol", "sol_viol"]
         S["deterministic"] = {k: dict(max=max((r[k] for r in feas), default=0.0),
                                       n_over_tol=sum(r[k] > cfg.tol for r in feas)) for k in fields}
-        S["deterministic"]["sign_contra"] = sum(r["sign_contra"] for r in feas)
-        S["deterministic"]["topk_contra"] = sum(r["topk_contra"] for r in feas)
+        fields += ["exact_gap", "joint_lb_viol"]   # Proposition check + LP-vs-interval sanity
+        for k in ("exact_gap", "joint_lb_viol"):
+            S["deterministic"][k] = dict(max=max((r[k] for r in feas), default=0.0),
+                                         n_over_tol=sum(r[k] > cfg.tol for r in feas))
+        for k in ("sign_contra", "topk_contra", "joint_contra"):
+            S["deterministic"][k] = sum(r[k] for r in feas)
         det_ok = det_ok and all(S["deterministic"][k]["n_over_tol"] == 0 for k in fields) \
-            and S["deterministic"]["sign_contra"] == 0 and S["deterministic"]["topk_contra"] == 0
-        # structural identity (theorem): d = 2, endpoint-fixed  =>  Gamma_LP == B_pair exactly
-        d2f = [r for r in feas if r["d"] == 2 and r["mode"] == "fixed"]
-        id_gap = max((abs(g - b) for r in d2f for g, b in zip(r["G_lp"], r["B_pair"])), default=0.0)
-        S["deterministic"]["d2_fixed_identity"] = dict(n_instances=len(d2f), max_abs_gap=id_gap,
-                                                       ok=bool(id_gap <= cfg.tol))
-        det_ok = det_ok and S["deterministic"]["d2_fixed_identity"]["ok"]
+            and all(S["deterministic"][k] == 0 for k in ("sign_contra", "topk_contra", "joint_contra"))
 
-        # tightness: primary (amended), by dimension, by dimension x mode, secondary, legacy pooled
-        primary = [r for r in feas if r["d"] >= cfg.go_lp_min_d]
-        S["tightness_primary_d_ge_min"] = _tightness(primary)
-        S["tightness_by_d"] = {f"d={d}": _tightness([r for r in feas if r["d"] == d]) for d in cfg.dims}
-        S["tightness_by_d_mode"] = {f"d={d}/{m}": _tightness([r for r in feas if r["d"] == d and r["mode"] == m])
-                                    for d in cfg.dims for m in ("domain", "fixed")}
-        S["tightness_secondary_cross_free_edge"] = _tightness(feas, _has_cross_free_edge)
-        S["tightness_by"] = {f"{m}/kappa={k}/nA={n}": _tightness(
-            [r for r in primary if r["mode"] == m and r["kappa"] == k and r["n_anchor"] == n])
-            for m in ("domain", "fixed") for k in cfg.kappas for n in cfg.n_anchor}
-        S["tightness_legacy_pooled_all_d"] = _tightness(feas)   # original (pre-amendment) criterion, report only
-        lp_ok = _lp_criterion(S["tightness_primary_d_ge_min"], cfg)
-        S["lp_tightness_legacy_pooled_pass"] = _lp_criterion(S["tightness_legacy_pooled_all_d"], cfg)
+        # Proposition: LP interval == pairwise interval => interval-tightness criterion is void
+        S["lp_interval_tightness"] = dict(
+            status="void_by_theorem", proposition="bounds.py: pairwise interval is exact under weighted l1",
+            max_abs_interval_gap=S["deterministic"]["exact_gap"]["max"],
+            legacy_reports=dict(pooled_all_d=_tightness(feas),
+                                d_ge_3=_tightness([r for r in feas if r["d"] >= cfg.go_lp_min_d]),
+                                cross_free_edge=_tightness(feas, _has_cross_free_edge)))
+
+        # amendment v2: joint certificates decide whether the LP stays in the method
+        joint_all = _joint(feas, cfg)
+        S["lp_joint_certificates"] = dict(
+            overall=joint_all,
+            by_d_mode={f"d={d}/{m}": _joint([r for r in feas if r["d"] == d and r["mode"] == m], cfg)
+                       for d in cfg.dims for m in ("domain", "fixed")},
+            by_mode_kappa={f"{m}/kappa={k}": _joint([r for r in feas if r["mode"] == m and r["kappa"] == k], cfg)
+                           for m in ("domain", "fixed") for k in cfg.kappas})
+
+        # anchor informativeness (report only; key usefulness signal for Phase 2)
+        S["anchor_informativeness_rho"] = dict(
+            overall=_rho(feas, cfg),
+            by_d={f"d={d}": _rho([r for r in feas if r["d"] == d], cfg) for d in cfg.dims},
+            by_n_anchor={f"nA={n}": _rho([r for r in feas if r["n_anchor"] == n], cfg) for n in cfg.n_anchor},
+            by_kappa={f"kappa={k}": _rho([r for r in feas if r["kappa"] == k], cfg) for k in cfg.kappas},
+            by_mode={m: _rho([r for r in feas if r["mode"] == m], cfg) for m in ("domain", "fixed")},
+            by_d_nA_mode={f"d={d}/nA={n}/{m}": _rho([r for r in feas if r["d"] == d and r["n_anchor"] == n
+                                                     and r["mode"] == m], cfg)
+                          for d in cfg.dims for n in cfg.n_anchor for m in ("domain", "fixed")})
+        S["certified_sign_rate"] = {f"d={d}/{m}": _tightness([r for r in feas if r["d"] == d and r["mode"] == m])
+                                    ["cert_sign_rate_lp"] for d in cfg.dims for m in ("domain", "fixed")}
         S["transfer"] = dict(  # empirical, not a theorem check
             frozen_phi_outside_rate=float(np.mean([r["transfer_out"] > cfg.tol for r in feas])) if feas else None,
             envelope_violation_rate=float(np.mean([r["VL"] > cfg.tol for r in feas])) if feas else None)
     S["go"]["deterministic_correctness"] = bool(det_ok)
     if mc:
         S["mc"] = {k: v for k, v in mc.items() if "/" in k}
+        S["mc_rho_exact"] = {k: v for k, v in mc.items() if k.startswith("rho_exact_")}
         S["go"]["mc_coverage"] = all(v["ok"] for v in S["mc"].values())
-    if lp_ok is not None:
-        S["go"]["lp_tightness"] = lp_ok
     if rt:
         S["runtime"] = rt
+    # amendment v2: Phase 1 GO = correctness + MC coverage; the LP decision is reported separately
     S["go"]["PHASE1_GO"] = all(S["go"].values())
+    S["go"]["lp_interval_tightness"] = "void_by_theorem"
+    if joint_all is not None:
+        S["go"]["lp_retained_for_joint_certificates"] = joint_all["lp_retained"]
     with open(os.path.join(out_dir, "summary.json"), "w") as fh:
         json.dump(S, fh, indent=2, default=_json_default)
     print(json.dumps(S["go"], indent=2, default=_json_default))

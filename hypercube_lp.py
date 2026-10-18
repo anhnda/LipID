@@ -8,6 +8,10 @@ delta_j. Hence
 and {anchor agreement + Lipschitz to every anchor}  <=>  box ell(z_S) <= t_S <= h(z_S).
 Every feasible t extends to a member of F_L(A) (McShane), so LP optima are exact.
 
+Note: single-feature intervals from this LP coincide with bounds.pair_bounds_exact (see the
+Proposition in bounds.py), so `interval()` is kept as a cross-check. The LP is genuinely needed only
+for joint objectives such as `abs_margin` (|phi_i| - |phi_j|) and top-k certificates.
+
 Solver: scipy HiGHS (torch has no LP solver). Torch is used for geometry and verification.
 """
 from __future__ import annotations

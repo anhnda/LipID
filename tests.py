@@ -185,6 +185,40 @@ def test_lp_equals_pair_d2_endpoint_fixed(seed, kappa):
     assert np.all(lp.cross_free_edges() == 0)
 
 
+@pytest.mark.parametrize("d", [3, 4, 5])
+@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize("kappa", [1.0, 1.5, 3.0])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_pairwise_interval_is_exact(d, fixed, kappa, seed):
+    """Proposition (bounds.py): under weighted l1 the pairwise interval equals the exact LP interval,
+    for any d, anchor mode, feasible L, with extra anchors far outside the hybrid box."""
+    s = _setup(d=d, n=40, seed=10 + seed, fixed=fixed)
+    far = 4.0 * torch.randn(8, d, generator=torch.Generator().manual_seed(200 + seed))
+    A = torch.cat([s["A"], far])
+    fA = _fa(A)
+    L = kappa * anchor_lipschitz(A, fA, s["sigma"])
+    lo_p, hi_p, _ = (v.numpy() for v in pair_bounds_exact(s["x"], s["r"], A, fA, L, s["sigma"]))
+    lp = HypercubeLP(s["x"], s["r"], A, fA, L, s["sigma"])
+    lo_l, hi_l = lp.interval()
+    assert np.allclose(lo_l, lo_p, atol=TOL) and np.allclose(hi_l, hi_p, atol=TOL)
+
+
+def test_abs_margin_never_below_interval_separation():
+    """Exact joint LP margin >= interval-separation lower bound min|phi_i| - max|phi_j|."""
+    s = _setup(d=4, seed=11)
+    lp = HypercubeLP(s["x"], s["r"], s["A"], s["fA"], s["L"], s["sigma"])
+    lo, hi = lp.interval()
+    for i in range(4):
+        for j in range(4):
+            if i == j:
+                continue
+            pc = lp.abs_margin(i, j)
+            if pc.kind == "exact":
+                min_i = 0.0 if lo[i] <= 0 <= hi[i] else min(abs(lo[i]), abs(hi[i]))
+                max_j = max(abs(lo[j]), abs(hi[j]))
+                assert pc.margin >= min_i - max_j - TOL
+
+
 def test_cross_free_edges_d2_domain():
     """d = 2, domain mode (r not an anchor): exactly one useful cross edge per feature (r -- other hybrid)."""
     s = _setup(d=2, seed=7)
