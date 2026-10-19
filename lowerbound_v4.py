@@ -48,7 +48,8 @@ MD_KEYS = ("m_err", "cert_viol", "strad_mismatch", "c1_viol",
            "sep_C_mean_box", "sep_C_mean_K4", "sep_C_zero_share", "sep_med_log10_nB",
            "sep_C_zero_share_nB2", "sep_C_zero_share_K4", "sep_K4_levels_med", "ambig_mass",
            "sep_mass_mu0", "sep_mass_mu1", "sep_mass_mu2", "sep_mass_mu3",
-           "sep_cov_mu0", "sep_cov_mu1", "sep_cov_mu2", "sep_cov_mu3")
+           "sep_cov_mu0", "sep_cov_mu1", "sep_cov_mu2", "sep_cov_mu3",
+           "sep_C_mu0", "sep_C_mu1", "sep_C_mu2", "sep_C_mu3")
 MD_MEAN = MD_KEYS[4:]
 
 
@@ -134,7 +135,7 @@ def process(run, device, ks, oracle_every, nm_eps=0.02):
                                         cp, cm = directional(ell, h, S, Pm, Ld)
                                         st = feature_stats(w, cp, cm)
                                         R = Rj[j]
-                                        rec = dict(d=d, model=model, mode=mode, lev=lev, k=L / L_min,
+                                        rec = dict(d=d, model=model, mode=mode, lev=lev, k=L / L_min, nA=nA, rhoc=rho,
                                                    rho_stored=e["rho"][j], rho=st.rho, dmin=st.dmin,
                                                    asym=st.asym, asym_pos=st.asym_pos, neg_part=st.neg_part,
                                                    negmass=st.negmass,
@@ -299,7 +300,10 @@ def main():
                    by_d_level=table(recs, lambda r: (r["d"], r["lev"]), tol, ks),
                    by_d_mode_level=table(recs, lambda r: (r["d"], r["mode"], r["lev"]), tol, ks),
                    by_d_model_level=table(recs, lambda r: (r["d"], r["model"], r["lev"]), tol, ks),
-                   by_d_model_mode_level=table(recs, lambda r: (r["d"], r["model"], r["mode"], r["lev"]), tol, ks))
+                   by_d_model_mode_level=table(recs, lambda r: (r["d"], r["model"], r["mode"], r["lev"]), tol, ks),
+                   # stratified controls for C_S / psi (n_A and correlation pooled elsewhere)
+                   by_d_mode_nA_level=table(recs, lambda r: (r["d"], r["mode"], r["nA"], r["lev"]), tol, ks),
+                   by_d_mode_rhoc_level=table(recs, lambda r: (r["d"], r["mode"], r["rhoc"], r["lev"]), tol, ks))
         fname = "lowerbound_v4_summary" + (f"_{args.tag}" if args.tag else "") + ".json"
         with open(os.path.join(run, fname), "w") as fh:
             json.dump(res, fh, indent=2)
@@ -328,6 +332,13 @@ def main():
             print(f"-- {name}: " + " | ".join(cols))
             for k, v in res[name].items():
                 print(k, " | ".join(fmt(v.get(c)) for c in cols))
+        strat = ["n_sat", "md_sep_C_mean_box", "md_sep_C_mu0", "md_sep_C_mu1", "md_sep_C_mu2", "md_sep_C_mu3",
+                 "md_sep_mass_mu3", "md_sep_cov_mu0", "md_sep_cov_mu1", "md_sep_cov_mu2", "md_sep_med_log10_nB"]
+        for name in ("by_d_mode_level", "by_d_mode_nA_level", "by_d_mode_rhoc_level"):
+            print(f"-- strata {name} (Lmin): " + " | ".join(strat))
+            for k, v in res[name].items():
+                if k.endswith("/Lmin"):
+                    print(k, " | ".join(fmt(v.get(c)) for c in strat))
         print("-- checks (must be 0 / ~1e-12): " + " | ".join(checks))
         for k, v in res["by_d_mode_level"].items():
             print(k, " | ".join(sci(v.get(c)) for c in checks))

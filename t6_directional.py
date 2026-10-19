@@ -294,6 +294,10 @@ def margin_diagnostic(R: Tensor, DA: Tensor, ratio: Tensor, cp: Tensor, cm: Tens
         inb = ne & (mu >= MU_GRID[b_] - 1e-12) & (mu < MU_GRID[b_ + 1])
         sep[f"sep_mass_mu{b_}"] = share(inb, ne)
         sep[f"sep_cov_mu{b_}"] = share(cert_psi_box, inb)
+        # C conditional on the margin stratum: C <= 1 - mu (lemma), so the unconditional mean of C falls
+        # mechanically when mu shifts up; only within-stratum means can show a change in pairwise coupling
+        wb = float(w[inb].sum())
+        sep[f"sep_C_mu{b_}"] = None if wb <= 0 else float((w * sd_box["C"])[inb].sum()) / wb
     wne = float(w[ne].sum())
     ne4 = full_K4 & ~sd_K4["empty"]
     wne4 = float(w[ne4].sum())
