@@ -32,17 +32,24 @@ import phase1 as P
 from bounds import all_masks, vertex_points
 from envelope import weighted_l1
 from t6_directional import (box_oracle_T, det_T, directional, edge_sets, efficiency_cap, envelopes_from_D,
-                            feature_stats, lb_from_T, margin_diagnostic, pair_tensor, quantized_T, slope_ratio)
+                            feature_stats, lb_from_T, margin_diagnostic, pair_tensor, quantized_T, slope_ratio,
+                            straddler_exact)
 
 LEVELS = ("Lmin", "LV", "Ltrue")
 MODES = ("domain", "fixed")
 SAT, BAND_HI = 0.8, 0.9
 MIN_SAT = 30          # minimum number of saturated feature-instances for the K4/box ratio
-MD_KEYS = ("m_err", "cert_viol", "rescued_mass", "blocked_mass", "rescued_frac_strad", "rescued_frac_ep_strad",
+MD_KEYS = ("m_err", "cert_viol", "strad_mismatch", "c1_viol",
+           "rescued_mass", "blocked_mass", "rescued_frac_strad", "rescued_frac_ep_strad",
            "rescued_med_log10_nstrad", "blocked_nm_share_strad", "blocked_nm_share_ep", "blocked_nm_t",
-           "blocked_nm_h", "G_strad", "G_neg", "G_01", "G_gt1", "full_box_mass", "full_K4_mass",
-           "cert_psi_box_share", "cert_unif_box_share", "cert_psi_K4_share")
-MD_MEAN = MD_KEYS[2:]
+           "blocked_nm_h", "G_strad", "G_neg", "G_01", "G_ge1", "full_box_mass", "full_K4_mass",
+           "psi_empty_share", "cert_psi_box_share", "cert_psi_box_share_nontriv",
+           "cert_unif_box_share", "cert_psi_K4_share",
+           "sep_C_mean_box", "sep_C_mean_K4", "sep_C_zero_share", "sep_med_log10_nB",
+           "sep_C_zero_share_nB2", "sep_C_zero_share_K4", "sep_K4_levels_med", "ambig_mass",
+           "sep_mass_mu0", "sep_mass_mu1", "sep_mass_mu2", "sep_mass_mu3",
+           "sep_cov_mu0", "sep_cov_mu1", "sep_cov_mu2", "sep_cov_mu3")
+MD_MEAN = MD_KEYS[4:]
 
 
 def default_device():
@@ -92,6 +99,7 @@ def process(run, device, ks, oracle_every, nm_eps=0.02):
                             D = weighted_l1(Z, A, sigma)                  # (2^m, |A|)
                             DA = weighted_l1(A, A, sigma)                 # (|A|, |A|)
                             Rj = {j: pair_tensor(D, edges[jj][0], edges[jj][1]) for jj, j in enumerate(active)}
+                            Sx = {j: straddler_exact(A, x, r, Z[edges[jj][1]], j) for jj, j in enumerate(active)}
                             for model in cfg["models"]:
                                 row = rows.get((d, rho, nA, model, xi, rj, mode))
                                 if row is None:
@@ -110,6 +118,13 @@ def process(run, device, ks, oracle_every, nm_eps=0.02):
                                         continue
                                     L = e["L"]
                                     ell, h = envelopes_from_D(D, fA, L)
+                                    # matched endpoint-gain analysis: both modes at the SAME L* = L_min(fixed).
+                                    # F_{L*}(A_fixed) is a subset of F_{L*}(A_domain), so domain signs at L* persist.
+                                    pair_env = None
+                                    if mode == "fixed" and lev == "Lmin":
+                                        drow = rows.get((d, rho, nA, model, xi, rj, "domain"))
+                                        pair_env = (envelopes_from_D(D[:, :-1], fA[:-1], L),
+                                                    None if drow is None else drow["L_min"])
                                     for jj, j in enumerate(active):
                                         if j not in row["active"]:
                                             continue
@@ -128,11 +143,18 @@ def process(run, device, ks, oracle_every, nm_eps=0.02):
                                         for K in ks[1:]:
                                             rec[f"K{K}"] = lb_from_T(quantized_T(R, DA, ratio, L, L_min, K), Ld, w)
                                         md = margin_diagnostic(R, DA, ratio, cp, cm, w, L, L_min, dj, endpoints, SAT,
-                                                               nm_eps=nm_eps)
+                                                               nm_eps=nm_eps, strad_exact=Sx[j])
                                         rec.update({f"md_{k_}": md[k_] for k_ in MD_KEYS})
                                         rec["eff"] = None
                                         if mode == "fixed":
                                             rec["eff"] = efficiency_cap(D_xr, Delta, L, dj, tol)
+                                        rec["pair"] = None
+                                        if pair_env is not None:
+                                            (ell_d, h_d), Lmin_dom = pair_env
+                                            std = feature_stats(w, *directional(ell_d, h_d, S, Pm, Ld))
+                                            rec["pair"] = dict(sign_dom=std.sign(Ld, tol), rho_dom=std.rho,
+                                                               raised=(Lmin_dom is not None and
+                                                                       L_min > Lmin_dom * (1 + 1e-12)))
                                         rec["oracle_err"] = None
                                         if oracle_every > 0 and n_rec % oracle_every == 0:
                                             box = lb_from_T(box_oracle_T(R, dF, L), Ld, w)
@@ -202,11 +224,18 @@ def table(recs, keyf, tol, ks):
             e[f"viol_K{K}"] = int(np.sum(bad))
             prev = v
         # ratio only with >= MIN_SAT saturated cases (pre-registered); absolute rates are always reported
-        e["K4_over_box"] = (None if int(sat.sum()) < MIN_SAT or e.get("expl_K4") is None or not expl
+        # = #{rho_4 > 0.8} / #{rho_box > 0.8}  (rho_4 <= box <= rho, so the rho > 0.8 filter cancels);
+        # reported only when the denominator #{box > 0.8} >= MIN_SAT
+        e["n_box"] = int((dmin > SAT).sum())
+        e["K4_over_box"] = (None if e["n_box"] < MIN_SAT or e.get("expl_K4") is None or not expl
                             else e["expl_K4"] / expl)
         for k_ in MD_MEAN:
             e[f"md_{k_}"] = _mean([r[f"md_{k_}"] for r in rs])
+        # number of feature-instances contributing to each mu-stratum (strata with < MIN_SAT are not interpreted)
+        for b_ in range(4):
+            e[f"n_sep_cov_mu{b_}"] = sum(r[f"md_sep_cov_mu{b_}"] is not None for r in rs)
         e["cert_viol"] = int(sum(r["md_cert_viol"] for r in rs))
+        e["c1_viol"] = int(sum(r["md_c1_viol"] for r in rs))
         e["n_sat"] = int(sat.sum())
         fx = [r for r in rs if r["eff"] is not None]
         if fx:
@@ -219,6 +248,22 @@ def table(recs, keyf, tol, ks):
                      viol_eff_sign=int(np.sum((forced != 0) & (sf != forced))),
                      frac_X_neg=float(np.mean(X < 0)),
                      eff_sign_share=_frac(X < 0, sf != 0))
+        # matched endpoint-gain analysis (fixed vs domain at the same L* = L_min(fixed), paired by feature-instance)
+        #   gained = signed in fixed, not in domain;  R_eff = P(I6 forces the sign | gained)  (coverage, not causation)
+        pr = [r for r in rs if r["pair"] is not None]
+        if pr:
+            sf = np.array([r["sign"] for r in pr])
+            sd = np.array([r["pair"]["sign_dom"] for r in pr])
+            forced = np.array([r["eff"]["forced_sign"] for r in pr])
+            gained = (sf != 0) & (sd == 0)
+            e.update(viol_pair_nested=int(np.sum((sd != 0) & (sf != sd))),
+                     sign_rate_fix_Lstar=float(np.mean(sf != 0)),
+                     sign_rate_dom_Lstar=float(np.mean(sd != 0)),
+                     frac_Lmin_raised=float(np.mean([r["pair"]["raised"] for r in pr])),
+                     n_gained=int(gained.sum()), gain_rate=float(np.mean(gained)),
+                     R_eff=_frac(forced != 0, gained),
+                     eff_on_dom_signed=_frac(forced != 0, sd != 0))
+        e["strad_mismatch"] = int(sum(r["md_strad_mismatch"] or 0 for r in rs))
         out["/".join(str(v) for v in key)] = e
     return out
 
@@ -262,11 +307,20 @@ def main():
                [f"expl_K{K}" for K in ks] + ["K4_over_box",
                "md_rescued_frac_strad", "md_rescued_frac_ep_strad", "md_rescued_med_log10_nstrad",
                "md_blocked_nm_share_strad", "md_blocked_nm_share_ep", "md_blocked_nm_t", "md_blocked_nm_h",
-               "md_G_strad", "md_G_neg", "md_G_01", "md_G_gt1",
-               "md_full_box_mass", "md_cert_psi_box_share", "md_cert_unif_box_share",
-               "md_full_K4_mass", "md_cert_psi_K4_share", "frac_X_neg", "eff_sign_share"]
+               "md_G_strad", "md_G_neg", "md_G_01", "md_G_ge1",
+               "md_full_box_mass", "md_psi_empty_share", "md_cert_psi_box_share", "md_cert_psi_box_share_nontriv",
+               "md_sep_C_mean_box", "md_sep_C_mean_K4", "md_sep_C_zero_share", "md_sep_med_log10_nB",
+               "md_sep_C_zero_share_nB2", "md_sep_C_zero_share_K4", "md_sep_K4_levels_med", "md_ambig_mass",
+               "md_sep_mass_mu0", "md_sep_mass_mu1", "md_sep_mass_mu2", "md_sep_mass_mu3",
+               "md_sep_cov_mu0", "md_sep_cov_mu1", "md_sep_cov_mu2", "md_sep_cov_mu3",
+               "n_sep_cov_mu0", "n_sep_cov_mu1", "n_sep_cov_mu2", "n_sep_cov_mu3",
+               "md_cert_unif_box_share", "md_full_K4_mass", "md_cert_psi_K4_share", "frac_X_neg", "eff_sign_share",
+               "sign_rate_fix_Lstar", "sign_rate_dom_Lstar", "frac_Lmin_raised", "n_gained", "gain_rate", "R_eff",
+               "eff_on_dom_signed", "n_box"]
         checks = ["viol_sign_half", "viol_dmin_lb", "viol_dmin_ub", "viol_asym_split", "regen_err_rho",
-                  "sign_mismatch", "oracle_max_err", "m_err", "cert_viol", "viol_det_fixed_Lmin",
+                  "sign_mismatch", "oracle_max_err", "m_err", "cert_viol", "c1_viol", "strad_mismatch",
+                  "viol_pair_nested",
+                  "viol_det_fixed_Lmin",
                   "viol_eff_rho", "viol_eff_box", "viol_eff_sign"] + [f"viol_K{K}" for K in ks]
         for name in ("by_d_mode_level", "by_d_model_mode_level"):
             print(f"-- {name}: " + " | ".join(cols))
