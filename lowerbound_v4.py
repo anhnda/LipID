@@ -286,6 +286,7 @@ def main():
     # scientific near-minimizer margin (units of delta_i); distinct from the round-off tie tolerance eta = 1e-9.
     # Run e.g. 0.01 / 0.02 / 0.05 and report the sensitivity of the blocked_nm_* columns.
     ap.add_argument("--nm-eps", type=float, default=0.02)
+    ap.add_argument("--tag", default="", help="suffix of the summary json, e.g. nm001 -> lowerbound_v4_summary_nm001.json")
     args = ap.parse_args()
     ks = tuple(int(s) for s in args.ks.split(","))
     assert ks[0] == 1 and all(b == 2 * a for a, b in zip(ks, ks[1:])), "--ks must be 1,2,4,..."
@@ -299,7 +300,8 @@ def main():
                    by_d_mode_level=table(recs, lambda r: (r["d"], r["mode"], r["lev"]), tol, ks),
                    by_d_model_level=table(recs, lambda r: (r["d"], r["model"], r["lev"]), tol, ks),
                    by_d_model_mode_level=table(recs, lambda r: (r["d"], r["model"], r["mode"], r["lev"]), tol, ks))
-        with open(os.path.join(run, "lowerbound_v4_summary.json"), "w") as fh:
+        fname = "lowerbound_v4_summary" + (f"_{args.tag}" if args.tag else "") + ".json"
+        with open(os.path.join(run, fname), "w") as fh:
             json.dump(res, fh, indent=2)
         print(f"\n=== {run} (seed {cfg['seed']})  missing={n_missing}  thresholds={res['thresholds_in_config']}")
         cols = ["n", "n_sat", "prev_sat", "med_rho", "expl_dmin", "base_mech", "n_band", "expl_band",
