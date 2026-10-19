@@ -161,7 +161,7 @@ def straddler_exact(A: Tensor, x: Tensor, r: Tensor, Zp: Tensor, i: int) -> Tens
     return coord_i[None] & between
 
 
-def psi_certificate(g: Tensor, h: Tensor, qv: Tensor, k: float) -> tuple[Tensor, Tensor, Tensor]:
+def psi_certificate(g: Tensor, h: Tensor, qv: Tensor, k: float, tol: float = 1e-12) -> tuple[Tensor, Tensor, Tensor]:
     """Decoupled sufficient certificate for FULL saturation of each edge (any L >= L_min, any K, box: qv = t).
       B_S   = {(u, v): g_uv,S < 1}                       (pairs with g >= 1 can never block, since (1 - k q) h >= 0)
       psi_S = max_{B_S} (1 - g)/h                         (geometry only: detour deficit per unit span)
@@ -173,7 +173,7 @@ def psi_certificate(g: Tensor, h: Tensor, qv: Tensor, k: float) -> tuple[Tensor,
     Returns (cert, empty, psi) per edge.
     Round-off: B_S uses g < 1 - 1e-12 (u = v pairs have g >= 1 exactly, but can come out as 1 - 1e-16 with h = 0);
     pairs with g in [1 - 1e-12, 1) keep V >= g >= 1 - 1e-12, the same tolerance as the full-saturation test."""
-    blk = g < 1.0 - 1e-12
+    blk = g < 1.0 - tol
     empty = ~blk.flatten(1).any(1)
     hh = h.expand_as(g)
     psi = torch.where(blk, (1.0 - g) / hh.clamp_min(1e-12), torch.full_like(g, float("-inf"))).flatten(1).max(1).values
@@ -308,9 +308,12 @@ def margin_diagnostic(R: Tensor, DA: Tensor, ratio: Tensor, cp: Tensor, cm: Tens
     #   K = 4 ties among the 4 quantized slope levels. For box, report C = 0 only among edges with |B_S| >= 2.
     ne_multi = ne & (sd_box["nB"] >= 2)
     lv4 = torch.stack([(blk & (q4[None] == l_ / 4.0)).flatten(1).any(1) for l_ in (1, 2, 3, 4)]).sum(0)
-    # round-off ambiguity: some pair with g in [1 - 1e-12, 1) or min V in [1 - 1e-12, 1). Certificates are claims
-    # of saturation up to 1e-12; these edges are flagged rather than silently counted as exact.
-    ambig = ((g >= 1.0 - 1e-12) & (g < 1.0)).flatten(1).any(1) | ((M >= 1.0 - 1e-12) & (M < 1.0))
+    # round-off ambiguity = the DECISION changes with the tolerance (1e-15 vs 1e-9), for full box saturation or for
+    # the psi certificate. (A first version flagged any pair with g in [1 - 1e-12, 1): that fires on pairs with
+    # g = 1 EXACTLY, e.g. (r, x) on every fixed-mode edge, computed as 1 - 1e-16, and is uninformative.)
+    amb_box = (M >= 1.0 - 1e-15) != (M >= 1.0 - 1e-9)
+    amb_psi = psi_certificate(g, h, ratio, k, tol=1e-15)[0] != psi_certificate(g, h, ratio, k, tol=1e-9)[0]
+    ambig = amb_box | amb_psi
     sep.update(sep_C_zero_share_nB2=share(sd_box["C"] <= 1e-12, ne_multi),
                sep_C_zero_share_K4=share(sd_K4["C"] <= 1e-12, ne4),
                sep_K4_levels_med=(float(lv4[ne4].to(w.dtype).median()) if bool(ne4.any()) else None),
