@@ -10,21 +10,36 @@ ell / h = McShane–Whitney envelopes of (A, f|_A, L):
 
 Exact (P3):          b_S = Ld min(c+, 1),  a_S = -Ld min(c-, 1)
                      rho_S = (min(c+,1) + min(c-,1)) / 2
-Former 'box' (T6):   T_box = min_{u,v} [L R_uv - |f(u) - f(v)|] = min(B+, B-)        (exact identity)
+Directional-min (former 'box', T6):
+                     T_box = min_{u,v} [L R_uv - |f(u) - f(v)|] = min(B+, B-)        (exact identity)
                      dmin_S = clamp(min(c+, c-), 0, 1)
 
-So rho and rho_box are the SAME two numbers combined by mean vs min. Deterministic consequences,
-per feature-instance (Shapley weights sum to 1):
-    (I1)  2 rho - 1  <=  rho_dmin  <=  rho           =>  rho - rho_dmin <= 1 - rho
-    (I2)  rho - rho_dmin = sum_S w_S |ĉ+ - ĉ-| / 2   when c± >= 0 on every edge (ĉ = min(c, 1))
-    (I3)  certified sign (lo > 0 or hi < 0)  =>  rho < 1/2
-    (I4)  domain mode (x in A):  s_S = (q+ + q-) / delta_i <= 1 + 2 D_S / delta_i,
-          D_S = sum_{j not in S+i} delta_j            (endpoint band; fixed mode: also with r)
+Deterministic consequences, per feature-instance (Shapley weights sum to 1):
+    (I1)  2 rho - 1  <=  rho_dmin  <=  rho
+    (I2)  rho - rho_dmin = asym_pos + neg_part, where on each edge (a = min(c+,1), b = min(c-,1))
+              min(a,b) >= 0:  |a - b| / 2      (directional asymmetry)
+              min(a,b) <  0:  (a + b) / 2      (one direction forced; the sign-relevant regime)
+    (I3)  certified sign  =>  rho < 1/2      (general: [lo, hi] inside [-L delta, L delta])
+    (I4)  s_S = (q+ + q-)/delta_i <= 1 + 2 D_S / delta_i  (x in A);  fixed mode: 1 + 2 min(B_S, D_S)/delta_i,
+          D_S = sum_{j not in S+i} delta_j,  B_S = sum_{j in S} delta_j
+    (I5)  fixed mode at L = L_min:  rho_det = 0 on every edge  (the pair (x, r) gives R - d = -delta_i)
+    (I6)  fixed mode, efficiency cap: with D = d(x, r), Delta = f(x) - f(r), X_i = (D - |Delta|/L)/delta_i - 1:
+              rho_dmin_i <= clamp(X_i, 0, 1),   rho_i <= (1 + min(1, X_i)) / 2,
+              X_i < 0  =>  sign(phi_i) = sign(Delta) is certified for every g in F_L(A)
+          (phi_i = Delta - sum_{j != i} phi_j and |phi_j| <= L delta_j.)
 
-Slope-quantized ladder between det and box (K slope levels, K = 1 is det, K -> inf is box):
-    Lam_K(u,v) = L_min * max(ceil(K * lambda_uv / L_min), 1) / K  >=  lambda_uv
-    T_K = min_{u,v} [L R_uv - Lam_K(u,v) d_uv],   rho_K = sum_S w_S clamp(T_K / Ld, 0, 1)
-    rho_1 = rho_det <= rho_2 <= rho_4 <= ... <= rho_box   (non-decreasing along powers of two)
+Per-pair margin (at level L, normalized by L delta_i):  g = (R - d)/delta_i >= -1,  h = d/delta_i, t = lambda/L_min,
+k = L_min / L:
+    det   : V = g + (1 - k) h
+    box   : V = g + (1 - k t) h                          (min over pairs = min(c+, c-))
+    K     : V = g + (1 - k q_K(t)) h,  q_K(t) = max(ceil(K t), 1) / K  >= t
+An edge is certified saturated by a bound iff min_{u,v} V >= 1 (M1). Pairs with g >= 1 never block, so only
+B_S = {g < 1} matters:  q_K(t) <= (1/k)(1 - (1 - g)/h)  on B_S.  For an exact straddler (g = -1) that is
+q_K(t) <= (1/k)(1 - 2/h)  — with q_K(t), not t, for finite K (t only in the box limit K -> inf).
+Decoupled sufficient certificates (geometry vs slope): k max_{B_S} q <= 1 - max_{B_S} (1 - g)/h  (psi-cert),
+weaker uniform form (1 - k Q) H >= 2 with H = min_{B_S} h.  'Straddlers' are pairs with g = -1
+(exact l1-betweenness of u, z+, z-, v); many pairs can tie there, so per-edge statistics below use the
+WHOLE tied / near-minimizing set, never a single argmin (argmin among ties is decided by round-off).
 """
 from __future__ import annotations
 
@@ -66,12 +81,14 @@ def directional(ell: Tensor, h: Tensor, S: Tensor, P: Tensor, Ld: float) -> tupl
 
 @dataclass
 class FeatureStats:
-    rho: float      # exact normalized AIW
-    dmin: float     # former rho_box  (= sum w clamp(min(c+,c-),0,1))
-    asym: float     # rho - dmin
-    negmass: float  # Shapley weight of edges with min(c+, c-) < 0  (one direction forced)
-    lo_n: float     # lo / Ld
-    hi_n: float     # hi / Ld
+    rho: float       # exact normalized AIW
+    dmin: float      # directional-min bound (former rho_box)
+    asym: float      # rho - dmin  (= asym_pos + neg_part)
+    asym_pos: float  # part from edges with both directions >= 0: sum w |a - b| / 2
+    neg_part: float  # part from edges with one direction < 0:    sum w (a + b) / 2
+    negmass: float   # Shapley weight of edges with min(c+, c-) < 0
+    lo_n: float      # lo / Ld
+    hi_n: float      # hi / Ld
 
     def sign(self, Ld: float, tol: float) -> int:
         if Ld * self.lo_n > tol:
@@ -83,11 +100,15 @@ class FeatureStats:
 
 def feature_stats(w: Tensor, cp: Tensor, cm: Tensor) -> FeatureStats:
     hp, hm = cp.clamp(max=1.0), cm.clamp(max=1.0)
-    rho = float((w * (hp + hm)).sum()) / 2.0
+    rho_e = (hp + hm) / 2.0
     mn = torch.minimum(cp, cm)
+    neg = mn < 0
+    rho = float((w * rho_e).sum())
     dmin = float((w * mn.clamp(0.0, 1.0)).sum())
-    return FeatureStats(rho=rho, dmin=dmin, asym=rho - dmin, negmass=float(w[mn < 0].sum()),
-                        lo_n=-float((w * hm).sum()), hi_n=float((w * hp).sum()))
+    asym_pos = float((w * (hp - hm).abs() / 2.0)[~neg].sum())
+    neg_part = float((w * rho_e)[neg].sum())
+    return FeatureStats(rho=rho, dmin=dmin, asym=rho - dmin, asym_pos=asym_pos, neg_part=neg_part,
+                        negmass=float(w[neg].sum()), lo_n=-float((w * hm).sum()), hi_n=float((w * hp).sum()))
 
 
 # ------------------------------------------------------------------- pair-based bounds
@@ -106,55 +127,131 @@ def box_oracle_T(R: Tensor, dF: Tensor, L: float) -> Tensor:
 
 
 def slope_ratio(DA: Tensor, dF: Tensor, L_min: float) -> Tensor:
-    """lambda_uv / L_min in [0, 1]; 0 on the diagonal."""
+    """t_uv = lambda_uv / L_min in [0, 1]; 0 on the diagonal."""
     lam = torch.where(DA > 1e-12, dF / DA.clamp_min(1e-12), torch.zeros_like(DA))
     return (lam / L_min).clamp(0.0, 1.0)
 
 
 def quantized_T(R: Tensor, DA: Tensor, ratio: Tensor, L: float, L_min: float, K: int) -> Tensor:
-    """T_K with K slope levels. K = 1 reproduces det exactly (Lam = L_min everywhere)."""
+    """T_K with K slope levels. K = 1 reproduces det exactly (Lam = L_min everywhere, also when t = 0)."""
     q = torch.clamp(torch.ceil(K * ratio), min=1.0) / K
     return (L * R - (L_min * q * DA)[None]).amin(dim=(1, 2))
 
 
-def det_argmin(R: Tensor, DA: Tensor, L: float, L_min: float) -> tuple[Tensor, Tensor, Tensor]:
-    """T_det per edge and the anchor pair (u*, v*) attaining it."""
-    T = (L * R - L_min * DA[None]).flatten(1)
-    val, k = T.min(dim=1)
-    nA = DA.shape[0]
-    return val, k // nA, k % nA
+def det_T(R: Tensor, DA: Tensor, L: float, L_min: float) -> Tensor:
+    return (L * R - L_min * DA[None]).amin(dim=(1, 2))
 
 
-def det_diagnostic(R: Tensor, DA: Tensor, ratio: Tensor, cp: Tensor, cm: Tensor, w: Tensor,
-                   L: float, L_min: float, Ld: float, endpoints: list[int], sat: float = 0.8) -> dict:
-    """On edges that det fails to saturate but dmin (= box) does, which anchor pairs make det fail?
-      share_endpoint : Shapley-weight share whose det-argmin pair involves x (or r), u != v
-      ratio_at_argmin: Shapley-weighted mean of lambda_{u*v*} / L_min (how far below worst case)
-    (A self pair u = v can never be the blocker: d(z+,u) + d(z-,u) >= delta gives T >= L delta,
-     i.e. the edge is saturated by that pair. So the argmin on masked edges is always u != v.)
-    Returns None-valued fields when no such edge exists."""
-    Tdet, u, v = det_argmin(R, DA, L, L_min)
-    e_det = (Tdet / Ld).clamp(0.0, 1.0)
-    e_box = torch.minimum(cp, cm).clamp(0.0, 1.0)
-    mask = (e_det < sat) & (e_box >= sat)
-    wm = float(w[mask].sum())
-    out = dict(mass=wm, share_endpoint=None, ratio_at_argmin=None)
-    if wm <= 0.0:
-        return out
-    ep = torch.tensor(endpoints, device=u.device)
-    is_ep = (torch.isin(u, ep) | torch.isin(v, ep)) & (u != v)
-    out["share_endpoint"] = float(w[mask & is_ep].sum()) / wm
-    out["ratio_at_argmin"] = float((w * ratio[u, v])[mask].sum()) / wm
+# ------------------------------------------------- tie-robust geometry / slope diagnostic
+def margin_diagnostic(R: Tensor, DA: Tensor, ratio: Tensor, cp: Tensor, cm: Tensor, w: Tensor,
+                      L: float, L_min: float, delta_i: float, endpoints: list[int], sat: float = 0.8,
+                      eta: float = 1e-9, nm_eps: float = 0.02) -> dict:
+    """Tie-robust replacement of the old argmin diagnostic. Per edge:
+      straddlers  = pairs with g <= -1 + eta (1 + h)   (exact l1-betweenness up to round-off)
+      box near-minimizers NM = pairs with V_box <= min V_box + nm_eps
+    Two edge groups (Shapley-weighted means; None when the group is empty):
+      rescued = det < sat <= box :  frac_strad   (edge has >= 1 straddler),
+                                    frac_ep_strad (edge has a straddler that involves x or r),
+                                    log10 of the straddler count (median over edges)
+      blocked = box < sat        :  NM share that are straddlers / involve x or r, mean t and h on NM
+    Also returns m_err = max |min V_box - min(c+, c-)| (identity check, must be ~1e-13)."""
+    g = (R - DA[None]) / delta_i
+    h = (DA / delta_i)[None]
+    N = DA.shape[0]
+    ep = torch.zeros(N, dtype=torch.bool, device=DA.device)
+    ep[endpoints] = True
+    ep_pair = (ep[:, None] | ep[None, :])[None]
+    strad = g <= -1.0 + eta * (1.0 + h)
+    n_strad = strad.flatten(1).sum(1)
+    has_ep_strad = (strad & ep_pair).flatten(1).any(1)
+
+    k = L_min / L
+    e_det = (g + (1.0 - k) * h).flatten(1).min(1).values.clamp(0.0, 1.0)
+    V = g + (1.0 - k * ratio[None]) * h
+    M = V.flatten(1).min(1).values
+    m_err = float((M - torch.minimum(cp, cm)).abs().max())
+    e_box = M.clamp(0.0, 1.0)
+    nm = V <= (M + nm_eps)[:, None, None]
+    n_nm = nm.flatten(1).sum(1).clamp_min(1).to(V.dtype)
+    sh_strad = (nm & strad).flatten(1).sum(1) / n_nm
+    sh_ep = (nm & ep_pair).flatten(1).sum(1) / n_nm
+    t_nm = (nm * ratio[None]).flatten(1).sum(1) / n_nm
+    h_nm = (nm * h).flatten(1).sum(1) / n_nm
+
+    def wmean(x, mask):
+        wm = float(w[mask].sum())
+        return None if wm <= 0 else float((w * x.to(w.dtype))[mask].sum()) / wm
+
+    # geometry-only minimum G_S = min g (L-independent). At L_min det_S = clamp(G_S, 0, 1); an exact straddler
+    # gives G_S = -1, but losing all straddlers (G_S > -1) does NOT make det positive (that needs G_S > 0).
+    G = g.flatten(1).min(1).values
+    has_strad = n_strad > 0
+    G_bins = dict(G_strad=float(w[has_strad].sum()),
+                  G_neg=float(w[~has_strad & (G <= 0)].sum()),
+                  G_01=float(w[(G > 0) & (G <= 1)].sum()),
+                  G_gt1=float(w[G > 1].sum()))
+
+    # decoupled sufficient certificates for FULL edge saturation (min V >= 1). Only pairs with g < 1 can block.
+    #   psi-certificate : k Q <= 1 - psi,  psi = max_{g<1} (1 - g)/h,  Q = max_{g<1} q   (geometry vs slope)
+    #   uniform (H, Q)  : (1 - k Q) H >= 2, H = min_{g<1} h                              (implies psi-cert)
+    blk = g < 1.0
+    empty = ~blk.flatten(1).any(1)
+    hh = h.expand_as(g)
+    neg_inf = torch.full_like(g, float("-inf"))
+    psi = torch.where(blk, (1.0 - g) / hh.clamp_min(1e-12), neg_inf).flatten(1).max(1).values
+    H = torch.where(blk, hh, torch.full_like(g, float("inf"))).flatten(1).min(1).values
+    q4 = torch.clamp(torch.ceil(4 * ratio), min=1.0) / 4
+    Qt = torch.where(blk, ratio[None].expand_as(g), torch.zeros_like(g)).flatten(1).max(1).values
+    Q4 = torch.where(blk, q4[None].expand_as(g), torch.zeros_like(g)).flatten(1).max(1).values
+    M4 = (g + (1.0 - k * q4[None]) * h).flatten(1).min(1).values
+    full_box, full_K4 = M >= 1.0 - 1e-12, M4 >= 1.0 - 1e-12
+    cert_psi_box = empty | (k * Qt <= 1.0 - psi)
+    cert_unif_box = empty | ((1.0 - k * Qt) * torch.where(empty, torch.ones_like(H), H) >= 2.0)
+    cert_psi_K4 = empty | (k * Q4 <= 1.0 - psi)
+    cert_viol = int(((cert_psi_box | cert_unif_box) & ~full_box).sum() + (cert_psi_K4 & ~full_K4).sum())
+
+    def share(c, full):
+        wm = float(w[full].sum())
+        return None if wm <= 0 else float(w[full & c].sum()) / wm
+
+    rescued = (e_det < sat) & (e_box >= sat)
+    blocked = e_box < sat
+    out = dict(m_err=m_err, cert_viol=cert_viol, **G_bins,
+               full_box_mass=float(w[full_box].sum()), full_K4_mass=float(w[full_K4].sum()),
+               cert_psi_box_share=share(cert_psi_box, full_box),
+               cert_unif_box_share=share(cert_unif_box, full_box),
+               cert_psi_K4_share=share(cert_psi_K4, full_K4),
+               rescued_mass=float(w[rescued].sum()), blocked_mass=float(w[blocked].sum()),
+               rescued_frac_strad=wmean(n_strad > 0, rescued),
+               rescued_frac_ep_strad=wmean(has_ep_strad, rescued),
+               rescued_med_log10_nstrad=(float(torch.log10(n_strad[rescued].to(w.dtype).clamp_min(1)).median())
+                                         if bool(rescued.any()) else None),
+               blocked_nm_share_strad=wmean(sh_strad, blocked),
+               blocked_nm_share_ep=wmean(sh_ep, blocked),
+               blocked_nm_t=wmean(t_nm, blocked),
+               blocked_nm_h=wmean(h_nm, blocked))
     return out
 
 
+# --------------------------------------------------------------------- fixed-mode caps
+def efficiency_cap(D_xr: float, Delta: float, L: float, delta_i: float, tol: float = 0.0) -> dict:
+    """(I6), fixed mode only. X = (D - |Delta|/L)/delta_i - 1.
+    X < 0 gives lo >= -L delta_i X (Delta > 0); the sign is reported as forced only when that margin exceeds
+    tol, so that it is comparable with the stored sign (lo > tol)."""
+    X = (D_xr - abs(Delta) / L) / delta_i - 1.0
+    forced = 0 if (-X * L * delta_i) <= tol or Delta == 0 else (1 if Delta > 0 else -1)
+    return dict(X=X, rho_cap=(1.0 + min(1.0, X)) / 2.0, box_cap=min(1.0, max(0.0, X)), forced_sign=forced)
+
+
 # --------------------------------------------------------------------- endpoint band
-def endpoint_band_bound(delta_active: Tensor, S: Tensor, jj: int) -> Tensor:
-    """(I4) upper bound on s_S from the anchor x alone: 1 + 2 D_S / delta_i,
-    D_S = sum of delta_j over active j not in S and j != i (bit order of edge_sets)."""
+def endpoint_band_bound(delta_active: Tensor, S: Tensor, jj: int, fixed: bool = False) -> Tensor:
+    """(I4) upper bound on s_S: 1 + 2 D_S / delta_i (x in A); fixed mode 1 + 2 min(B_S, D_S) / delta_i."""
     m = delta_active.numel()
     bits = ((S.unsqueeze(1) >> torch.arange(m, device=S.device)) & 1).bool()
     comp = ~bits
     comp[:, jj] = False
     D_S = (comp.to(delta_active.dtype) * delta_active[None, :]).sum(1)
+    if fixed:
+        B_S = (bits.to(delta_active.dtype) * delta_active[None, :]).sum(1)
+        D_S = torch.minimum(D_S, B_S)
     return 1.0 + 2.0 * D_S / delta_active[jj]

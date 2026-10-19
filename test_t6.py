@@ -3,14 +3,16 @@ test_t6.py — tests for the directional decomposition (run: python -m pytest -q
 Independent references: pair_bounds_exact (bounds.py) for rho, and the O(|A|^2) formulas for box / det.
 """
 import itertools
+import math
 
 import pytest
 import torch
 
 from bounds import all_masks, pair_bounds_exact, vertex_points
 from envelope import anchor_lipschitz, weighted_l1
-from t6_directional import (box_oracle_T, directional, edge_sets, endpoint_band_bound, envelopes_from_D,
-                            feature_stats, lb_from_T, pair_tensor, quantized_T, slope_ratio)
+from t6_directional import (box_oracle_T, det_T, directional, edge_sets, efficiency_cap, endpoint_band_bound,
+                            envelopes_from_D, feature_stats, lb_from_T, margin_diagnostic, pair_tensor,
+                            quantized_T, slope_ratio)
 
 torch.set_default_dtype(torch.float64)
 TOL = 1e-9
@@ -101,11 +103,67 @@ def test_slope_ladder(d, seed, kappa, fixed, f):
 
 @pytest.mark.parametrize("d,seed,fixed", list(itertools.product((3, 4, 5), (0, 1, 2), (False, True))))
 def test_endpoint_band(d, seed, fixed):
-    """(I4): with x in A, s_S <= 1 + 2 D_S / delta_i (the near-x band can never be certified by rho_low)."""
+    """(I4): s_S <= 1 + 2 D_S / delta_i (x in A); fixed mode 1 + 2 min(B_S, D_S) / delta_i."""
     I = _instance(d, seed, 1.0, fixed, _fa)
     q = I["D"].min(dim=1).values
     da = I["delta"][I["active"]]
     for jj, j in enumerate(I["active"]):
         S, P, w = I["edges"][jj]
         s = (q[P] + q[S]) / I["delta"][j]
-        assert bool((s <= endpoint_band_bound(da, S, jj) + TOL).all())
+        assert bool((s <= endpoint_band_bound(da, S, jj, fixed=fixed) + TOL).all())
+
+
+@pytest.mark.parametrize("d,seed,f", list(itertools.product((2, 3, 4, 5), (0, 1, 2), (_fa, _lin))))
+def test_fixed_mode_det_is_zero_at_Lmin(d, seed, f):
+    """(I5): with x, r in A and L = L_min, the pair (x, r) gives R - d = -delta_i on every edge -> det = 0."""
+    I = _instance(d, seed, 1.0, True, f)
+    for jj, j in enumerate(I["active"]):
+        S, P, w = I["edges"][jj]
+        Ld = float(I["L"] * I["delta"][j])
+        R = pair_tensor(I["D"], S, P)
+        assert lb_from_T(det_T(R, I["DA"], I["L"], I["L_min"]), Ld, w) <= TOL
+
+
+@pytest.mark.parametrize("d,seed,kappa,f", list(itertools.product((2, 3, 4, 5), (0, 1, 2), (1.0, 1.5), (_fa, _lin))))
+def test_fixed_mode_efficiency_cap(d, seed, kappa, f):
+    """(I6): rho <= (1 + min(1, X))/2, dmin <= clamp(X), X < 0 forces sign(phi_i) = sign(f(x) - f(r))."""
+    I = _instance(d, seed, kappa, True, f)
+    D_xr = float(I["delta"].sum())
+    Delta = float(f(I["x"][None]) - f(I["r"][None]))
+    for jj, j in enumerate(I["active"]):
+        S, P, w = I["edges"][jj]
+        dj = float(I["delta"][j])
+        Ld = I["L"] * dj
+        cp, cm = directional(I["ell"], I["h"], S, P, Ld)
+        st = feature_stats(w, cp, cm)
+        cap = efficiency_cap(D_xr, Delta, I["L"], dj, 1e-9)
+        assert st.rho <= cap["rho_cap"] + TOL
+        assert st.dmin <= cap["box_cap"] + TOL
+        if cap["forced_sign"] != 0:
+            assert st.sign(Ld, 1e-9) == cap["forced_sign"]
+        assert abs(st.asym - st.asym_pos - st.neg_part) < TOL
+
+
+@pytest.mark.parametrize("d,seed,kappa,fixed", list(itertools.product((3, 4, 5), (0, 1), (1.0, 1.5), (False, True))))
+def test_margin_diagnostic_identity(d, seed, kappa, fixed):
+    """min over pairs of the box margin V equals min(c+, c-) on every edge (no argmin involved)."""
+    I = _instance(d, seed, kappa, fixed, _fa)
+    dF = (I["fA"][:, None] - I["fA"][None, :]).abs()
+    ratio = slope_ratio(I["DA"], dF, I["L_min"])
+    endpoints = [I["A"].shape[0] - (2 if fixed else 1)] + ([I["A"].shape[0] - 1] if fixed else [])
+    for jj, j in enumerate(I["active"]):
+        S, P, w = I["edges"][jj]
+        dj = float(I["delta"][j])
+        cp, cm = directional(I["ell"], I["h"], S, P, I["L"] * dj)
+        md = margin_diagnostic(pair_tensor(I["D"], S, P), I["DA"], ratio, cp, cm, w, I["L"], I["L_min"], dj,
+                               endpoints)
+        assert md["m_err"] < 1e-9
+        assert md["cert_viol"] == 0                    # decoupled certificates imply full saturation
+        assert abs(md["G_strad"] + md["G_neg"] + md["G_01"] + md["G_gt1"] - 1.0) < 1e-12
+
+
+def test_quantized_straddler_counterexample():
+    """Finite K needs q_K(t), not t: g = -1, h = 3, t = 0.3, K = 4 -> V_box = 1.1 >= 1 but V_4 = 0.5 < 1."""
+    g, h, t, K = -1.0, 3.0, 0.3, 4
+    q = max(math.ceil(K * t), 1) / K
+    assert abs((g + (1 - t) * h) - 1.1) < 1e-12 and abs((g + (1 - q) * h) - 0.5) < 1e-12
