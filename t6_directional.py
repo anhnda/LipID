@@ -129,22 +129,21 @@ def det_diagnostic(R: Tensor, DA: Tensor, ratio: Tensor, cp: Tensor, cm: Tensor,
                    L: float, L_min: float, Ld: float, endpoints: list[int], sat: float = 0.8) -> dict:
     """On edges that det fails to saturate but dmin (= box) does, which anchor pairs make det fail?
       share_endpoint : Shapley-weight share whose det-argmin pair involves x (or r), u != v
-      share_self     : share whose det-argmin is a self pair u = v (pure distance-to-anchor limit)
       ratio_at_argmin: Shapley-weighted mean of lambda_{u*v*} / L_min (how far below worst case)
+    (A self pair u = v can never be the blocker: d(z+,u) + d(z-,u) >= delta gives T >= L delta,
+     i.e. the edge is saturated by that pair. So the argmin on masked edges is always u != v.)
     Returns None-valued fields when no such edge exists."""
     Tdet, u, v = det_argmin(R, DA, L, L_min)
     e_det = (Tdet / Ld).clamp(0.0, 1.0)
     e_box = torch.minimum(cp, cm).clamp(0.0, 1.0)
     mask = (e_det < sat) & (e_box >= sat)
     wm = float(w[mask].sum())
-    out = dict(mass=wm, share_endpoint=None, share_self=None, ratio_at_argmin=None)
+    out = dict(mass=wm, share_endpoint=None, ratio_at_argmin=None)
     if wm <= 0.0:
         return out
     ep = torch.tensor(endpoints, device=u.device)
-    is_self = u == v
-    is_ep = (torch.isin(u, ep) | torch.isin(v, ep)) & ~is_self
+    is_ep = (torch.isin(u, ep) | torch.isin(v, ep)) & (u != v)
     out["share_endpoint"] = float(w[mask & is_ep].sum()) / wm
-    out["share_self"] = float(w[mask & is_self].sum()) / wm
     out["ratio_at_argmin"] = float((w * ratio[u, v])[mask].sum()) / wm
     return out
 

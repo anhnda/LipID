@@ -177,8 +177,10 @@ def table(recs, keyf, tol, ks):
             e[f"viol_K{K}"] = int(np.sum(bad))
             prev = v
         satr = [r for r, s_ in zip(rs, sat) if s_]
-        e["det_share_endpoint"] = _med([r["det_share_endpoint"] for r in satr])
-        e["det_share_self"] = _med([r["det_share_self"] for r in satr])
+        # per-record shares are nearly 0/1 (few masked edges) -> median is uninformative, report the mean
+        sh = [r["det_share_endpoint"] for r in satr if r["det_share_endpoint"] is not None]
+        e["n_det_diag"] = len(sh)
+        e["det_share_endpoint"] = float(np.mean(sh)) if sh else None
         e["det_ratio_at_argmin"] = _med([r["det_ratio_at_argmin"] for r in satr])
         out["/".join(str(v) for v in key)] = e
     return out
@@ -193,7 +195,9 @@ def main():
     ap.add_argument("runs", nargs="+")
     ap.add_argument("--device", default=default_device())
     ap.add_argument("--ks", default="1,2,4,8,16", help="slope levels, powers of two, must start at 1")
-    ap.add_argument("--oracle-every", type=int, default=10, help="0 disables the O(|A|^2) box oracle")
+    # default 1: a stride like 10 aliases with the fixed record pattern per instance (levels x features),
+    # so some (d, level) groups were never checked
+    ap.add_argument("--oracle-every", type=int, default=1, help="0 disables the O(|A|^2) box oracle")
     args = ap.parse_args()
     ks = tuple(int(s) for s in args.ks.split(","))
     assert ks[0] == 1 and all(b == 2 * a for a, b in zip(ks, ks[1:])), "--ks must be 1,2,4,..."
@@ -211,7 +215,7 @@ def main():
         print(f"\n=== {run} (seed {cfg['seed']})  missing={n_missing}  thresholds={res['thresholds_in_config']}")
         cols = ["n", "prev_sat", "med_rho", "expl_dmin", "base_mech", "excess", "n_band", "expl_band",
                 "med_asym_sat", "sign_rate", "frac_rho_lt_half"] + [f"expl_K{K}" for K in ks] + \
-               ["det_share_endpoint", "det_share_self", "det_ratio_at_argmin"]
+               ["n_det_diag", "det_share_endpoint", "det_ratio_at_argmin"]
         checks = ["viol_sign_half", "viol_dmin_lb", "viol_dmin_ub", "regen_err_rho", "sign_mismatch",
                   "oracle_max_err"] + [f"viol_K{K}" for K in ks]
         for name in ("by_d_level", "by_d_model_level"):
@@ -219,8 +223,9 @@ def main():
             for k, v in res[name].items():
                 print(k, " | ".join(fmt(v.get(c)) for c in cols))
         print("-- checks (must be 0 / ~1e-12): " + " | ".join(checks))
+        sci = lambda x: "-" if x is None else (f"{x:.1e}" if isinstance(x, float) else str(x))
         for k, v in res["by_d_level"].items():
-            print(k, " | ".join(fmt(v.get(c)) for c in checks))
+            print(k, " | ".join(sci(v.get(c)) for c in checks))
 
 
 if __name__ == "__main__":
