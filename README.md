@@ -1,5 +1,8 @@
 # LipID v1.1 — reproducibility package (protocol `lipid-v3.0`)
 
+> **v1.2 revision:** new experiments, theory code, protocol locks and paper drafts are described in `README_v12.md`
+> (`scripts/reproduce_revision.sh`). Nothing below changes.
+
 Code for *LipID: Sharp Identification Bounds for Shapley Attributions from Limited Model Observations*.
 This package regenerates every table, figure and quoted number in `lipid_v1_1.tex` from raw, row-level outputs.
 

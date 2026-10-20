@@ -1,0 +1,90 @@
+{
+ "protocol": "lipid-v1.2-revision",
+ "status": "DRAFT - edit, commit, then lock with scripts/lock_protocol.py BEFORE running any confirmatory seed",
+ "principles": [
+  "Theorem 1 and all v1.1 results (seeds 1-4 exploration, 8-11 confirmation, C2b/C4b failures, C5 specification error) are kept unchanged; nothing is re-labelled.",
+  "Every new experiment states its question, independent comparator, outcome, and acceptance or reporting rule here before it runs.",
+  "Negative and null results are reported in full; no configuration is changed after seeing confirmatory data. Any post-lock change is reported as a deviation (lipid/lock.py records it).",
+  "Classification: JNT-01 and REP-01 are verification; STAT-01 is confirmatory; JNT-02/JNT-03, MET-02, SCL-02, CERT-02 are descriptive/exploratory unless stated otherwise."
+ ],
+ "experiments": {
+  "JNT-01": {
+   "reviewer": "Q3",
+   "question": "Do the closed-form pairwise bounds equal the sharp extrema of phi_i - phi_j over F_L(A)?",
+   "comparators": ["finite-hybrid LP with ALL vertex-pair constraints (does not use the shortest-path reduction)", "edge-only LP (Proposition J)", "solver-free extremal labeling + McShane extension + full Shapley evaluation"],
+   "grid": {"d": [2, 3, 4, 5, 6], "mode": ["domain", "fixed"], "n_anchor": [0, 2, 6, 16, 64], "scales": ["unit", "nonuniform"], "models": ["linear_random", "fa", "stable_ood", "unstable_id", "random_lipschitz"], "levels": ["L_A", "1.5 L_A", "3 L_A", "L_V", "L_cert"], "reps": 3, "rng_key": "jnt01"},
+   "edge_cases": ["duplicated anchors", "x_j = r_j on some coordinates (null players)", "L = L_A", "L > L_A", "positive and negative Shapley differences", "anchors exactly at hybrid vertices", "all hybrids observed (point identification)", "single anchor (L_A = 0)", "extreme scale ratio 100", "d = 2 closed form"],
+   "tolerance": {"closed_vs_lp_normalized": 1e-8, "normalizer": "c_ij = L (delta_i + delta_j)", "lp_solution_violation_normalized": 1e-9, "construction_violation_relative": 1e-12, "construction_value_relative": 1e-10},
+   "acceptance": "zero comparisons above every tolerance; any failure is reported with its instance and investigated, never dropped"
+  },
+  "JNT-02": {
+   "reviewer": "Q3",
+   "question": "How many more signed pairwise orderings are certified by sharp pairwise bounds than by comparing marginal intervals?",
+   "design": "Section-6 instances regenerated with the archived RNG streams (lipid/instances.py); matched pairs (same seed, chain, x, r, feature pair, n, L).",
+   "primary_level": "cert", "diagnostic_levels": ["oracle", "LV", "opt"],
+   "metrics": ["fraction of unordered active pairs with a strict signed certificate (pairwise vs marginal)", "gain in percentage points", "number of newly certified pairs", "fraction of instances with >= 1 additional certificate", "strict signed top-1 certification rate"],
+   "secondary": ["Proposition-2 absolute certificates", "runtime", "by d, n, generator, anchor law, mode, level", "containment of the true difference at valid L (must be 1)", "dominance pairwise >= marginal (must hold in every row)"],
+   "tolerance": {"sign_tol_normalized": 1e-6, "normalizer": "c_ij for BOTH methods"},
+   "reporting": "mean and full distribution of the per-instance gain, including zero-gain cells; a small gain is reported as such and the corollary is then presented as a mathematical result, not as an empirical contribution"
+  },
+  "JNT-03": {
+   "reviewer": "Q3",
+   "question": "Do joint constraints (sharp bounds on phi_i + phi_j) add absolute-ranking certificates beyond Proposition 2?",
+   "subset": {"seeds": [8, 9, 10, 11], "x_ids": [0, 1], "n_anchor": [256, 4096], "levels": ["cert", "oracle"], "note": "subset fixed by index, before results"},
+   "comparators": ["Proposition 2 (marginal, sufficient)", "exact certificate from sharp Delta (closed form) and Sigma (edge LP)", "hypercube_lp.abs_margin (existing 4-LP method) on a sub-subset as cross-check"],
+   "outcomes": ["additional certified absolute pairs", "absolute top-1 certificates", "runtime overhead"],
+   "reporting": "supplementary table; main text only if the gain is material"
+  },
+  "STAT-01": {
+   "reviewer": "Q7",
+   "classification": "confirmatory",
+   "seeds": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124],
+   "seed_note": "new independent seeds; historical seeds 1-4 (exploration), 5-7 (earlier follow-ups), 8-11 (confirmation) keep their original role and are reported descriptively",
+   "unit": "seed (one matched aggregate per seed and estimand)",
+   "inference": {"interval": "95% t interval over seeds (df = S - 1)", "sensitivity": "percentile bootstrap over seeds, B = 20000, rng 20261020", "test": "two-sided one-sample t test of mean 0", "multiplicity": "Holm within each family; Bonferroni-simultaneous t intervals also reported"},
+   "primary": {
+    "P1": {"family": "P1", "estimand": "p_sat(d=6) - p_sat(d=3)", "filter": {"L_kind": "oracle", "anchor_law": "data", "mode": "domain", "n_anchor": 4096}, "pooling": "generators and rho_c pooled within seed", "secondary": ["same for mode = fixed", "same at L_kind = cert"]},
+    "P2": {"family": "P2", "estimand": "mean matched (rho_data - rho_prod)", "filter": {"L_kind": "oracle", "rho_corr": 0.99, "n_anchor": 4096, "mode": "domain"}, "strata": "d in {3,4,5,6} (family of 4)", "secondary": ["mode = fixed", "L_kind = cert", "rho_corr = 0 negative control"]},
+    "P3": {"family": "P3", "estimand": "mean matched (rho_cert - rho_oracle)", "filter": {"anchor_law": "data", "mode": "domain", "n_anchor": 4096}, "strata": "generator in {fa, stable_ood} (family of 2); linear and unstable_id are structural zeros (L_cert = L*), reported but not tested", "secondary": ["sign-certification rate difference cert - oracle"]},
+    "P4": {"family": "P4", "estimand": "pairwise minus marginal signed-certification rate", "filter": {"L_kind": "cert", "anchor_law": "data", "mode": "domain", "n_anchor": 4096}, "pooling": "d, rho_c and generators pooled within seed", "note": "nonnegative by theorem; the interval quantifies its magnitude", "secondary": ["per d", "L_kind = oracle"]}
+   },
+   "reporting": "all primary estimands are reported regardless of sign or significance; if fewer than 10 seeds complete, only descriptive min-max is reported and no interval is computed",
+   "lock_files": ["protocols/v12_preregistration.json", "scripts/run_nested.py", "scripts/run_pairwise.py", "scripts/stat01_analyze.py", "lipid/pipeline.py", "lipid/pairwise_pipeline.py", "lipid/instances.py", "lipid/pairwise.py", "lipid/stats.py", "lipid/calibration.py", "lipid/io.py", "nested_anchors_v2.py", "phase1.py", "envelope.py", "bounds.py", "t6_directional.py"]
+  },
+  "MET-02": {
+   "reviewer": "Q2",
+   "question": "How do AIW, saturation, sign and ranking certification change with the choice of sigma, with L re-certified for each metric?",
+   "scale_choices": ["mad (1.4826 MAD, SD fallback when MAD = 0)", "sd", "unit (raw units)"],
+   "normalization": "each sigma vector rescaled to the geometric mean of the MAD vector (cosmetic: intervals are invariant to a common factor when L is rescaled accordingly)",
+   "synthetic_design": "Gaussian copula with rho_c in {0, 0.9}; coordinate marginals cycle gauss / t3 / lognormal / binary(Z > 0.5), multiplied by log-spaced scales 0.25..4; rationale: with identical unit-variance Gaussian marginals (Section 6) MAD, SD and unit scales coincide up to noise and a common factor, so the comparison would be vacuous",
+   "grid": {"d": [3, 4, 5, 6], "rho_corr": [0.0, 0.9], "n_anchor": [256, 4096], "mode": ["domain", "fixed"], "models": ["linear", "fa", "stable_ood", "unstable_id"], "x_per_seed": 5, "refs_per_x": 4, "seeds": [201, 202, 203, 204], "levels": ["cert", "oracle", "opt"]},
+   "real_data": "diabetes audit (REAL-01 split and models), sigma in {mad+fallback, sd, unit}, n_log in {16, 150}",
+   "sanity": "sigma -> c sigma with L -> c L leaves every interval unchanged (max relative change reported)",
+   "metrics": ["median rho", "p_sat", "sign rate", "pairwise and marginal ranking certification", "L_cert / L_V", "containment at cert (must be 1)"]
+  },
+  "SCL-02": {
+   "reviewer": "Q5",
+   "question": "Separated from saturation of the exact interval, how informative are valid Monte Carlo bounds at practical budgets?",
+   "designs": {"passive": "1024 data anchors + x (Table 6 design; reference negative result)", "hybrid_local": "B anchors at hybrid vertices z_S (|S| uniform on 0..m, S uniform given |S|) plus tau * sigma * N(0, I) jitter, + x; a fixed, NON-adaptive geometric rule that never uses f outside the queried anchors nor any interval value; benchmark instance generator, not a proposed query strategy"},
+   "pilot": {"rng_key": "scl02/pilot", "m": [8, 12], "instances": 5, "model": "linear", "candidates": {"tau": [0.0, 0.1, 0.3], "B": [256, 1024]}, "rule": "choose the candidate minimising |median exact rho at m = 12 - 0.5| subject to median rho in [0.2, 0.8]; ties: smaller B, then smaller tau; if none qualifies, record it and evaluate all candidates as a negative result"},
+   "eval": {"rng_key": "scl02/eval", "m": [8, 12, 16, 20, 24], "exact_max_m": 20, "instances": 10, "models": ["linear", "fa"], "L": "L_cert", "n_k": [16, 64, 256], "reps_per_instance": 20, "alpha": 0.05},
+   "methods": {"hoeffding_paper": "appendix F as published (log 4m^2/alpha, overall clipping)", "hoeffding_tight": "exact union count over sampled strata + exhaustive enumeration of strata of size <= n_k + per-stratum clipping", "bernstein": "Maurer-Pontil empirical Bernstein per sampled stratum and side, union bound; exhaustive small strata", "serfling_wor": "sampling without replacement with Serfling's bound; exhaustive small strata", "negative_control": "hoeffding_tight with radius 0"},
+   "metrics": ["excess normalized width over exact", "sign and marginal-ranking certificates retained", "runtime, CUDA peak memory, coalition evaluations", "simultaneous containment failures with Clopper-Pearson 95% upper bound"],
+   "reporting": "if every valid method stays near-vacuous on non-saturated instances, that is the reported result; zero failures on saturated instances are not evidence of precision"
+  },
+  "CERT-02": {
+   "reviewer": "Q6",
+   "classification": "diagnostic (uses the confirmation seeds 8-11 descriptively)",
+   "question": "Why do geometry/range certificates miss saturation when the exact AIW is near 1?",
+   "chain": "exact >= |slope| pairwise relaxation (= min(c+, c-) per edge) >= max(geometry-only pairwise relaxation, RANGE) >= max(T3, RANGE) = uni",
+   "classes": {"sign_asymmetry": "rho_abs <= 0.8 < rho_exact", "slope_magnitude": "rho_abs > 0.8 >= max(rho_geo_pair, rho_range)", "decoupling": "max(rho_geo_pair, rho_range) > 0.8 >= rho_uni", "certified": "rho_uni > 0.8"},
+   "grid": {"seeds": [8, 9, 10, 11], "d": [5, 6], "n_anchor": [1024, 4096], "levels": ["oracle", "cert"]},
+   "rule": "a new analytic certificate is proposed only if it is a proven lower bound AND cheaper or more interpretable than the O(|A| 2^m) exact envelope"
+  },
+  "REP-01": {
+   "reviewer": "Q7",
+   "checks": ["manifest output checksums", "source hashes vs manifests", "clean-environment rerun (Docker or fresh venv) of tests and a declared subset of steps", "numeric comparison of regenerated tables (rtol 1e-9, atol 1e-12)"],
+   "reporting": "the verification report states exactly which steps were independently re-run; partial coverage is reported as partial"
+  }
+ }
+}

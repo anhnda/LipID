@@ -1,0 +1,37 @@
+% ============================================================================================================
+% LipID v1.2 — discussion text for reviewer Q4 (other games), Q1 (operational calibration) and the four properties.
+% ============================================================================================================
+
+% ------------------------------------------------------------------------------- Section 2 / 8: Q4
+\paragraph{Conditional, manifold and relational games.}
+Baseline, conditional-expectation, manifold-restricted and relational Shapley values define different estimands:
+they change the value function $v(S)$, not only how it is estimated. Theorem~\ref{thm:sharp}, Corollary~\ref{cor:pair}
+and Proposition~\ref{prop:joint} use three properties of the baseline game: (i) $v(S)=g(z_S)$ is a point evaluation of the
+unknown response at a hybrid; (ii) the hybrids form a box whose weighted-$\ell_1$ distances are sums of coordinate gaps,
+so edge constraints imply all vertex-pair constraints and the edgewise extrema are simultaneously attainable; (iii) the
+only information about $g$ is its anchor values and the Lipschitz class. For a conditional game,
+$v(S)=\mathbb E[g(x_S,X_{\bar S})\mid X_S=x_S]$ is an integral of $g$ against a distribution that must itself be specified or
+estimated, so the identified set depends on that distributional model and on the support where $g$ is integrated;
+the closed form does not transfer, although the linear-program view of Proposition~\ref{prop:joint} extends to any finite
+quadrature of such integrals at the cost of the edge reduction. Manifold restrictions remove off-manifold hybrids from
+the admissible interventions; this changes the vertex set and generally breaks property (ii). We therefore make no
+numerical comparison across estimands, and we do not claim that our sharpness results hold for them.
+
+% ------------------------------------------------------------------------------- Section 5.1: Q1
+\paragraph{Information access for calibration.}
+The auditor's inferential inputs are the anchor outputs and one scalar $L$. A valid $L$ must come from the model owner or
+an independent verifier who can certify a Lipschitz bound in the stated metric on a domain containing every anchor and
+every hybrid; global certificates satisfy this automatically, local ones only when the certified domain is checked to
+contain all hybrids. The hybrid oracle $L_V$ is used only to validate the methodology on synthetic models. A valid but
+conservative certificate can make intervals uninformative (Table~\ref{tab:calcert}); the optimistic $L_A$ requires no
+certificate but provides no guarantee and can exclude the true attribution (Proposition~\ref{prop:optimistic}).
+
+% ------------------------------------------------------------------------------- Section 7.4 / 8
+\paragraph{Sharpness, validity, informativeness and joint utility.}
+A reported interval should state which of four properties it claims. \emph{Sharpness}: it equals the projection of the
+identified set (Theorem~\ref{thm:sharp} for single attributions, Corollary~\ref{cor:pair} for pairwise differences).
+\emph{Validity}: it contains every admissible attribution, which requires a certified $L$. \emph{Informativeness}: it is
+narrow enough to certify a sign or an ordering. \emph{Joint utility}: statements about several attributions use the joint
+identified set rather than separately attained marginal extrema (Proposition~\ref{prop:rank}). Sharp pairwise bounds
+extract all ranking information available under the stated class; they cannot create information that passive
+observations do not contain.

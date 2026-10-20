@@ -1,0 +1,171 @@
+% ============================================================================================================
+% LipID v1.2 — new theory (Revision A; reviewer Q3) + certificate-chain identity (CERT-02; reviewer Q6).
+% Drop-in text for Section 4 and Appendices A/E. Notation as in v1.1: weighted-l1 metric d_sigma, delta_i,
+% D = d_sigma(x, r), envelopes ell = ell_L, h = h_L (eq. 7), class F_L(A) (eq. 3), m active players.
+% Requires amsthm environments `proposition', `corollary', `lemma', `remark', `proof' as in the v1.1 source.
+% Numbers are NOT written here: empirical statements live in v12_experiments.tex and use \lipnum{...}.
+% ============================================================================================================
+
+% ------------------------------------------------------------------------------------------------ Section 4
+\subsection{Joint identification and pairwise contrasts}\label{sec:joint}
+
+Theorem~\ref{thm:sharp} describes each attribution separately. Sign and ranking statements, however, concern several
+attributions of the \emph{same} admissible model. We first describe the joint identified set exactly and then show
+that every pairwise difference again has a closed-form sharp interval.
+
+Index the hybrid vertices by $S\subseteq[m]$ and write $t_S$ for a candidate value of $g(z_S)$. Let
+\begin{equation}\label{eq:polytope}
+\mathcal P(A,L)=\Bigl\{t\in\mathbb R^{2^m}:\ \ell_L(z_S)\le t_S\le h_L(z_S)\ \ \forall S,\qquad
+|t_{S\cup\{k\}}-t_S|\le L\delta_k\ \ \forall S,\ k\notin S\Bigr\},
+\end{equation}
+and let $M\in\mathbb R^{m\times 2^m}$ be the Shapley matrix, $\phi(g)=M\,(g(z_S))_S$.
+
+\begin{proposition}[Exact joint identified set]\label{prop:joint}
+For $L\ge L_A$,
+\[
+\mathcal I_{\mathrm{joint}}(A,L):=\{\phi(g):g\in\mathcal F_L(A)\}=\{Mt:\ t\in\mathcal P(A,L)\}.
+\]
+In particular $\mathcal I_{\mathrm{joint}}$ is a polytope, every linear contrast $c^\top\phi$ has a sharp interval
+given by two linear programs over $\mathcal P(A,L)$, and the marginal intervals of Theorem~\ref{thm:sharp} are its
+coordinate projections.
+\end{proposition}
+
+The proposition is an exact finite formulation, not an efficient algorithm: $\mathcal P(A,L)$ has $2^m$ variables
+and $m2^{m-1}$ edge constraints. Its value is conceptual and computational: it is the ground truth against which
+closed forms can be checked, and it delivers contrasts that have no closed form (Remark~\ref{rem:sum}).
+
+For players $i\neq j$ and $S\subseteq[m]\setminus\{i,j\}$ put $P_S=z_{S\cup\{i\}}$, $Q_S=z_{S\cup\{j\}}$,
+$\beta_S=|S|!\,(m-|S|-2)!/(m-1)!$ and $c_{ij}=L(\delta_i+\delta_j)$. The two points differ exactly in coordinates
+$i$ and $j$, so $d_\sigma(P_S,Q_S)=\delta_i+\delta_j$.
+
+\begin{corollary}[Sharp pairwise Shapley differences]\label{cor:pair}
+Let $L\ge L_A$ and $\delta_i,\delta_j>0$. Then $\{\phi_i(g)-\phi_j(g):g\in\mathcal F_L(A)\}=[\underline\Delta_{ij},\overline\Delta_{ij}]$
+with both endpoints attained, where
+\begin{equation}\label{eq:pair}
+\underline\Delta_{ij}=\sum_{S}\beta_S\max\{\ell_L(P_S)-h_L(Q_S),\,-c_{ij}\},\qquad
+\overline\Delta_{ij}=\sum_{S}\beta_S\min\{h_L(P_S)-\ell_L(Q_S),\,c_{ij}\}.
+\end{equation}
+Moreover $\underline\Delta_{ij}\ge\underline\phi_i-\overline\phi_j$ and $\overline\Delta_{ij}\le\overline\phi_i-\underline\phi_j$.
+\end{corollary}
+
+The construction mirrors that of Theorem~\ref{thm:sharp}, with the two disjoint faces $\{P_S\}$ and $\{Q_S\}$ in place of
+the two $i$-faces; we therefore present it as a corollary. Its practical consequence is that ranking statements need not
+be inferred from separately attained marginal extrema.
+
+\begin{proposition}[Exact ranking certificates]\label{prop:rank}
+Let $L\ge L_A$ and let $i\neq j$ be active.
+\begin{enumerate}
+\item[(a)] $\phi_i(g)>\phi_j(g)$ for every $g\in\mathcal F_L(A)$ if and only if $\underline\Delta_{ij}>0$.
+\item[(b)] A set $T$ with $|T|=k$ is the strict signed top-$k$ set of every $g\in\mathcal F_L(A)$ if and only if
+      $\underline\Delta_{ij}>0$ for all $i\in T$, $j\notin T$. If it exists it is unique and equals
+      $\{i:\#\{j:\underline\Delta_{ij}>0\}\ge m-k\}$.
+\item[(c)] Let $\Sigma_{ij}=\phi_i+\phi_j$ with sharp interval $[\underline\Sigma_{ij},\overline\Sigma_{ij}]$ from
+      Proposition~\ref{prop:joint}. Then $|\phi_i(g)|>|\phi_j(g)|$ for every $g\in\mathcal F_L(A)$ if and only if
+      \[
+      \bigl(\underline\Delta_{ij}>0\ \text{and}\ \underline\Sigma_{ij}>0\bigr)\quad\text{or}\quad
+      \bigl(\overline\Delta_{ij}<0\ \text{and}\ \overline\Sigma_{ij}<0\bigr).
+      \]
+\end{enumerate}
+The marginal conditions of Proposition~\ref{prop:certs} are sufficient for (a)--(c) but not necessary.
+\end{proposition}
+
+\begin{remark}[No edgewise closed form for sums]\label{rem:sum}
+Grouping the four vertices $z_S,z_{S\cup\{i\}},z_{S\cup\{j\}},z_{S\cup\{i,j\}}$,
+$\phi_i+\phi_j=\sum_{S}\bigl[2w_{s+1}v(S\cup\{i,j\})-2w_sv(S)+(w_s-w_{s+1})\{v(S\cup\{i\})+v(S\cup\{j\})\}\bigr]$ with
+$s=|S|$ and $w_s=s!(m-s-1)!/m!$. The coefficient $w_s-w_{s+1}$ changes sign at $s=(m-2)/2$, so the functional couples
+four faces with mixed signs and the edgewise decoupling behind~\eqref{eq:pair} is not available; we use the two linear
+programs of Proposition~\ref{prop:joint}.
+\end{remark}
+
+% ------------------------------------------------------------------------------------------------ Appendix A
+\subsection*{A.2\quad Proof of Proposition~\ref{prop:joint}}
+($\subseteq$) For $g\in\mathcal F_L(A)$, $t_S=g(z_S)$ lies between the envelopes and satisfies every edge constraint
+because $d_\sigma(z_S,z_{S\cup\{k\}})=\delta_k$. ($\supseteq$) Let $t\in\mathcal P(A,L)$. Two vertices $z_S,z_T$ differ
+exactly in the coordinates of $S\triangle T$, so by coordinate additivity of the weighted-$\ell_1$ metric
+$d_\sigma(z_S,z_T)=\sum_{k\in S\triangle T}\delta_k$. Flipping the coordinates of $S\triangle T$ one at a time gives a
+path of hypercube edges of total length $d_\sigma(z_S,z_T)$; summing the edge constraints along it yields
+$|t_S-t_T|\le L\,d_\sigma(z_S,z_T)$. The box is equivalent to $|t_S-f(a)|\le L\,d_\sigma(z_S,a)$ for every anchor $a$
+(definition~\eqref{eq:envelopes} of the envelopes), and the anchor labels are $L$-Lipschitz because $L\ge L_A$. Hence the
+labeling of the finite set $A\cup\{z_S\}$ is $L$-Lipschitz, and its McShane extension
+$g(z)=\min_{p}\{t_p+L\,d_\sigma(z,p)\}$ belongs to $\mathcal F_L(A)$ with $g(z_S)=t_S$, so $\phi(g)=Mt$. If a vertex coincides
+with an anchor its box is the single point $f(a)$. \qed
+
+\subsection*{A.3\quad Proof of Corollary~\ref{cor:pair}}
+\emph{Identity.} Splitting the Shapley sums of $\phi_i$ and $\phi_j$ over $S\subseteq[m]\setminus\{i,j\}$ gives the classical
+identity $\phi_i-\phi_j=\sum_S\beta_S\,[v(S\cup\{i\})-v(S\cup\{j\})]$, where $\beta_S$ are the Shapley weights of the
+$(m-1)$-player game; they sum to one.
+
+\emph{Necessity.} For $g\in\mathcal F_L(A)$, $g(P_S)-g(Q_S)\le h_L(P_S)-\ell_L(Q_S)$ by the envelopes and
+$\le L\,d_\sigma(P_S,Q_S)=c_{ij}$ by the Lipschitz condition; similarly from below. Weighting by $\beta_S\ge0$ gives
+$\underline\Delta_{ij}\le\phi_i-\phi_j\le\overline\Delta_{ij}$.
+
+\emph{Attainment of the upper endpoint.} Write $d_{ST}=\sum_{k\in S\triangle T}\delta_k$; then
+$d_\sigma(P_S,P_T)=d_\sigma(Q_S,Q_T)=d_{ST}$ and $d_\sigma(P_S,Q_T)=d_{ST}+\delta_i+\delta_j$. Define on the two faces
+\[
+v(Q_T)=\ell_L(Q_T),\qquad v(P_T)=\min\{h_L(P_T),\,\ell_L(Q_T)+c_{ij}\}.
+\]
+(i) \emph{Envelopes.} $v(Q_T)\in[\ell_L(Q_T),h_L(Q_T)]$. Also $v(P_T)\le h_L(P_T)$, and $v(P_T)\ge\ell_L(P_T)$ because
+$h_L\ge\ell_L$ and $\ell_L(Q_T)+c_{ij}\ge\ell_L(P_T)$ ($\ell_L$ is $L$-Lipschitz and $d_\sigma(P_T,Q_T)=c_{ij}/L$). Hence every
+value is consistent with every anchor label.
+(ii) \emph{Within faces.} $T\mapsto\ell_L(Q_T)$ is $L$-Lipschitz in $d_{ST}$; so are $T\mapsto h_L(P_T)$ and
+$T\mapsto\ell_L(Q_T)+c_{ij}$ (because $d_\sigma(Q_S,Q_T)=d_\sigma(P_S,P_T)$), and so is their minimum.
+(iii) \emph{Across faces.} $v(P_S)-v(Q_T)\le\ell_L(Q_S)+c_{ij}-\ell_L(Q_T)\le L d_{ST}+c_{ij}=L\,d_\sigma(P_S,Q_T)$. Conversely
+$v(Q_T)-v(P_S)=\max\{\ell_L(Q_T)-h_L(P_S),\ \ell_L(Q_T)-\ell_L(Q_S)-c_{ij}\}\le L\,d_\sigma(P_S,Q_T)$, using
+$\ell_L(u)-h_L(w)\le L\,d_\sigma(u,w)$, which holds for $L\ge L_A$: with maximizing anchor $a$ for $\ell_L(u)$ and minimizing
+anchor $b$ for $h_L(w)$, $\ell_L(u)-h_L(w)=f(a)-f(b)-L\{d_\sigma(u,a)+d_\sigma(w,b)\}\le L\{d_\sigma(a,b)-d_\sigma(u,a)-d_\sigma(w,b)\}\le
+L\,d_\sigma(u,w)$.
+(iv) Together with the anchor labels, (i)--(iii) give an $L$-Lipschitz labeling of a finite set; its McShane extension
+$g\in\mathcal F_L(A)$ satisfies $g(P_S)-g(Q_S)=\min\{h_L(P_S)-\ell_L(Q_S),c_{ij}\}$ for every $S$, i.e.\
+$\phi_i(g)-\phi_j(g)=\overline\Delta_{ij}$. The lower endpoint follows from
+$v(Q_T)=h_L(Q_T)$, $v(P_T)=\max\{\ell_L(P_T),h_L(Q_T)-c_{ij}\}$ by the symmetric argument. Values at hybrids outside the
+two faces are irrelevant to $\phi_i-\phi_j$ and are fixed by the extension.
+
+\emph{Comparison with marginal bounds.} $\phi_i-\phi_j\ge\underline\phi_i-\overline\phi_j$ for every feasible $g$, and the left
+side attains $\underline\Delta_{ij}$. \emph{Null players.} If $\delta_j=0$ then $\phi_j\equiv0$ and $\phi_i-\phi_j=\phi_i$ is
+covered by Theorem~\ref{thm:sharp}; formula~\eqref{eq:pair} with $j$ kept as a player ($c_{ij}=L\delta_i$, $Q_S=z_S$)
+reduces to it, which the test suite checks. \qed
+
+\subsection*{A.4\quad Proof of Proposition~\ref{prop:rank}}
+(a) The infimum of $\phi_i-\phi_j$ over $\mathcal F_L(A)$ is $\underline\Delta_{ij}$ and is attained, so it is positive iff
+every feasible $g$ has $\phi_i>\phi_j$. (b) The statement quantifies over $g$ and over pairs $(i,j)\in T\times T^c$; the two
+universal quantifiers commute, so (a) applies pair by pair. The certified relation $G=\{(i,j):\underline\Delta_{ij}>0\}$ is
+antisymmetric; members of a certified top-$k$ set dominate the $m-k$ outsiders and an outsider, being dominated by all of
+$T$, dominates at most $m-k-1$ players, which gives the stated characterization and uniqueness.
+(c) $|\phi_i|>|\phi_j|$ iff $(\phi_i-\phi_j)(\phi_i+\phi_j)>0$. The set $K=\{(\Delta_{ij}(g),\Sigma_{ij}(g))\}$ is a linear image of
+$\mathcal P(A,L)$ (Proposition~\ref{prop:joint}), hence compact and convex. If every point of $K$ satisfies
+$\Delta\Sigma>0$, then $K$ avoids both coordinate axes and, being connected, lies in one open quadrant; the quadrants with
+$\Delta\Sigma>0$ are $\{\Delta,\Sigma>0\}$ and $\{\Delta,\Sigma<0\}$, and by compactness the corresponding minima
+(maxima) are attained and strictly positive (negative). The converse is immediate. Sufficiency of the marginal
+conditions follows from $\underline\Delta_{ij}\ge\underline\phi_i-\overline\phi_j$ and $\underline\Sigma_{ij}\ge\underline\phi_i+\underline\phi_j$. \qed
+
+% ------------------------------------------------------------------------------------------------ Appendix E
+\subsection*{E.2\quad A chain of relaxations of the saturation certificate}
+Fix an $i$-edge $(z^-,z^+)$ and write the directional gaps~\eqref{eq:directional} as
+$c^{+}=\min_{u,v\in A}\{d_\sigma(z^+,u)+d_\sigma(z^-,v)+(f(u)-f(v))/L\}/\delta_i$ and symmetrically for $c^-$.
+Let $k=\min(L_A/L,1)$, $q(z)=d_\sigma(z,A)$, $s=\{q(z^+)+q(z^-)\}/\delta_i$ and $\Omega_A=\max_Af-\min_Af$.
+
+\begin{proposition}[Relaxation chain]\label{prop:chain}
+Replacing $f(u)-f(v)$ by $-|f(u)-f(v)|$ in $c^+$ gives \emph{exactly} $\min(c^+,c^-)$. Consequently, with all terms clipped to
+$[0,1]$, the edge contributions satisfy
+\[
+\rho_{i,S}\ \ge\ \rho^{\mathrm{abs}}_{i,S}=\min(1,c^+,c^-)\ \ge\ \max\{\rho^{\mathrm{geo}}_{i,S},\rho^{\mathrm{range}}_{i,S}\}\ \ge\
+\max\{\rho^{\mathrm{T3}}_{i,S},\rho^{\mathrm{range}}_{i,S}\},
+\]
+where $\rho^{\mathrm{geo}}_{i,S}=\min_{u,v}\{d_\sigma(z^+,u)+d_\sigma(z^-,v)-k\,d_\sigma(u,v)\}/\delta_i$,
+$\rho^{\mathrm{range}}_{i,S}=s-\Omega_A/(L\delta_i)$ and $\rho^{\mathrm{T3}}_{i,S}=(1-k)s-k$; the right end is the certificate of
+Proposition~\ref{prop:geomrange}. Summing with weights $w_S$, the gap between $\rho_i$ and that certificate splits into three
+nonnegative terms: direction asymmetry ($\rho_i-\rho_i^{\mathrm{abs}}$), slope magnitude, and decoupling.
+\end{proposition}
+
+\begin{proof}
+Since $-|t|=\min(t,-t)$, the relaxed double minimum is the smaller of two minima of separable sums:
+$\min_{u}\{d_\sigma(z^+,u)+f(u)/L\}+\min_v\{d_\sigma(z^-,v)-f(v)/L\}=(h_L(z^+)-\ell_L(z^-))/L$ and
+$\min_u\{d_\sigma(z^+,u)-f(u)/L\}+\min_v\{d_\sigma(z^-,v)+f(v)/L\}=(h_L(z^-)-\ell_L(z^+))/L$; dividing by $\delta_i$ gives
+$\min(c^+,c^-)$. Next, $|f(u)-f(v)|\le L_A d_\sigma(u,v)=kL\,d_\sigma(u,v)$ gives the geometry-only bound, and
+$|f(u)-f(v)|\le\Omega_A$ with $d_\sigma(z^\pm,\cdot)\ge q(z^\pm)$ gives the range bound. Finally
+$d_\sigma(u,v)\le d_\sigma(u,z^+)+\delta_i+d_\sigma(z^-,v)$ turns the geometry-only bound into $(1-k)s-k$ for $k\le1$. Clipping
+and the nonnegative weights preserve all inequalities, and $(\min(1,c^+)+\min(1,c^-))/2\ge\min(1,c^+,c^-)$.
+\end{proof}
+
+The geometry-only term costs $O(|A|^2)$ per edge, more than the exact $O(|A|)$ envelope; it is a diagnostic, not a
+cheaper certificate. Its role is to locate where the simple certificates lose information.
