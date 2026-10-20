@@ -35,7 +35,11 @@ stamp "start DEVICE=$DEVICE WORKERS=$WORKERS STEPS='$STEPS' commit=$(git rev-par
 has tests_v12      && run tests_v12 $PY -m pytest -q -rfEs tests/test_v12_pairwise.py tests/test_v12_joint.py \
                         tests/test_v12_mc_certdiag.py tests/test_v12_instances.py tests/test_v12_stats_lock.py \
                         --junitxml=logs/v12_pytest_junit.xml
-has jnt01          && run jnt01 $PY scripts/jnt01_validate_pairwise.py --workers "$WORKERS"
+if has jnt01; then
+  # exit code 1 = pre-specified verdict NOT accepted; it is recorded, the pipeline (e.g. a clean-env rerun) continues
+  run jnt01 $PY scripts/jnt01_validate_pairwise.py --workers "$WORKERS" \
+    || stamp "jnt01 exited non-zero: verdict NOT accepted (results_v12/jnt01_manifest.json); recorded, continuing"
+fi
 has pairs_explore  && run pairs_explore $PY scripts/run_pairwise.py --seeds 1 2 3 4 --tag explore --out runs/pairs_explore --device "$DEVICE"
 has pairs_confirm  && run pairs_confirm $PY scripts/run_pairwise.py --seeds 8 9 10 11 --tag confirm --out runs/pairs_confirm --device "$DEVICE"
 has jnt02          && run jnt02 $PY scripts/jnt02_analyze.py --run explore=runs/pairs_explore --run confirm=runs/pairs_confirm --main confirm

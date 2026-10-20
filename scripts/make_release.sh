@@ -7,8 +7,8 @@
 # Refuses to run on a dirty tree. Output: release/lipid_v1.2_<commit>.tar.gz and release/SHA256SUMS.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "dirty working tree: commit first (the release must correspond to one commit)"; exit 1
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then   # untracked outputs are expected and packaged
+  echo "tracked files modified: the code in the release must equal one commit"; git status --porcelain --untracked-files=no; exit 1
 fi
 COMMIT="$(git rev-parse --short=12 HEAD)"
 NAME="lipid_v1.2_${COMMIT}"
