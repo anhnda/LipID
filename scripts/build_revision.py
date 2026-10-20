@@ -135,9 +135,15 @@ def gather_checks():
             issues.append(f"SCL-02: {len(bad)} valid-method cells with empirical failure rate > alpha = .05")
     v = load("verification_report.json")
     if v:
-        checks["REP-01"] = dict(ok=v.get("ok"), scope=v.get("scope"))
+        comps = v.get("comparisons") or []
+        checks["REP-01"] = dict(ok=v.get("ok"), scope=v.get("scope"), n_tables_compared=sum(c["n_files"] for c in comps))
         if not v.get("ok"):
             issues.append("REP-01 verification failed")
+        if not v.get("scope") or not comps:
+            issues.append("REP-01: no independent clean-environment rerun recorded (verification_report.json has no "
+                          "scope / comparisons); run STEPS='clean_env' before claiming reproduction")
+    else:
+        issues.append("REP-01: verification_report.json missing (run STEPS='clean_env verify')")
     return checks, issues
 
 
@@ -166,6 +172,9 @@ def main():
         have = [f for f in files if os.path.exists(os.path.join(OUT, f))]
         status = ("text" if not files else ("complete" if len(have) == len(files) else
                                              ("partial" if have else "NOT RUN")))
+        if item.startswith("REP-01") and status == "complete":
+            rep = checks.get("REP-01", {})
+            status = "complete" if rep.get("scope") and rep.get("n_tables_compared") else "integrity check only (no rerun)"
         md.append(f"| {q} | {item} | {kind} | {status} | {', '.join(files) or '-'} | {loc} | {code} |")
     md += ["", "## Integrity checks", "", "```json", json.dumps(checks, indent=1, default=str), "```", "",
            "## Issues (must be empty before submission)", ""] + ([f"* {i}" for i in issues] or ["* none"])
