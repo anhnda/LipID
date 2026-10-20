@@ -1,92 +1,142 @@
-# AIW — Phase 1 (mathematical validation) + amendment v3 (P0)
+# LipID v1.1 — reproducibility package (protocol `lipid-v3.0`)
 
-Attribution Identifiability Width for reference-conditioned Shapley values over the
-anchor-constrained Lipschitz class F_L(A), weighted-l1 metric.
+Code for *LipID: Sharp Identification Bounds for Shapley Attributions from Limited Model Observations*.
+This package regenerates every table, figure and quoted number in `lipid_v1_1.tex` from raw, row-level outputs.
 
-**Status.** The v2 code was run by the team (confirmatory grid, seed 1). The v3 additions in this
-revision (optimistic ceiling, L_V, rho_inf, MC negative control, GPU device, new tests) have **not been
-executed by their author**. Run the unit tests first.
+**Historical code is unchanged.** The files at the repository root (`phase1.py`, `nested_anchors_v2.py`,
+`envelope.py`, `bounds.py`, `t6_directional.py`, `hypercube_lp.py`, …) are the archived Phase-1 / P0'' code.
+`nested_anchors_v2.py` produced the P0'' confirmation summary `legacy/nested2_summary_confirm.json`
+(seeds 8–11; it matches Table 3 of the draft cell for cell). New code lives in `lipid/` and `scripts/`, and it
+only *imports* the historical modules. The new nested runner reuses the same RNG streams and arithmetic, and
+`tests/test_pipeline_regression.py` checks that its output matches `nested_anchors_v2.run_seed` row for row.
 
-## Requirements
-Python ≥ 3.9, `torch`, `numpy`, `scipy` (≥ 1.9, HiGHS), `pytest`. CUDA optional.
+---
 
-## Files
-| File | Content |
-|---|---|
-| `envelope.py` | weighted-l1 metric, exact McShane–Whitney envelopes, L_A, member generator `min(h, max(ℓ, ψ))`, V_L |
-| `bounds.py` | exact pairwise bounds B_pair + Shapley-weighted distance D_i; **v3:** `hybrid_vertices`, `shapley_full`, `geometric_rho_inf` (ρ^∞); stratified Monte Carlo certificates with `radius_scale` (negative control only) |
-| `hypercube_lp.py` | exact LP on hypercube edges, intervals, sign certificates, exact \|φ\| pair margins (≤ 4 LPs), top-k membership, ordered top-k, verification of LP optima |
-| `phase1.py` | experiments, technical GO and the separate scientific verdict |
-| `tests.py` | deterministic unit tests (100), incl. references that share no code with what they test |
+## 0. Setup
 
-## Run
 ```bash
-python -m pytest -q tests.py
-python phase1.py --out phase1_quick --quick            # pilot (seed 0)
-
-# confirmatory: register the scientific thresholds BEFORE the run (they go to config.json)
-python phase1.py --out phase1_out \
-    --sci-rho-target 0.8 --sci-min-frac 0.25 --sci-min-sign-rate 0.10
-
-# replication on fresh seeds (seed 0 is reserved for the pilot)
-for s in 2 3 4; do python phase1.py --out phase1_seed$s --seed $s --sci-rho-target 0.8 \
-    --sci-min-frac 0.25 --sci-min-sign-rate 0.10; done
-
-python phase1.py --out phase1_out --device cpu         # default --device auto = cuda if available
+python -m pip install -r requirements.txt   # torch with CUDA optional; pyarrow recommended
+git init && git add -A && git commit -m "lipid v1.1 code"   # skip if already a repo
 ```
-The threshold values above are placeholders: choose them **before** looking at any v3 output.
-Data are drawn on CPU with CPU generators and then moved to the device, so the numbers are identical on
-CPU and GPU. The LPs always run on CPU (scipy HiGHS). For d ≤ 5 the GPU gives little speed-up.
+Commit **before** running: every manifest records `git rev-parse HEAD` and the dirty flag.
 
-## Theory used by v3 (fixed A, x, r, weighted ℓ1)
-1. **Exactness.** Pairwise bounds give the exact class interval (also for disjoint feature blocks as players).
-2. **Monotonicity / nesting.** ρ_i(L) = Γ_i / (2Lδ_i) is non-decreasing in L; intervals are nested.
-3. **Geometric limit.** ρ_i(L) → ρ_i^∞ = Σ_S w_S min(1, [d(z⁺,A) + d(z⁻,A)] / δ_i), and ρ_i(L) ≤ ρ_i^∞ ≤ min(1, D_i/δ_i).
-   ρ^∞ is an **upper bound only**: f = u + v with anchors {(0,0), (1,1)} has ρ(L) = 1 − 1/L while ρ^∞ = 1.
-4. **Optimistic ceiling.** For every valid L ≥ L_min = L_A(A): ρ(L) ≥ ρ(L_min), and the signs / top-k
-   certified at L are a subset of those certified at L_min. No knowledge of L_true is needed.
-5. **Local validity.** At L_V = Lip(f on hybrids ∪ A) the interval provably contains φ(f)
-   (McShane extension of f restricted to hybrids ∪ A). L_min ≤ L_V ≤ L_true.
+## 1. One command
 
-Chain reported per instance: ρ(L_min) ≤ ρ(L_V) ≤ ρ(L_true) ≤ ρ^∞.
+```bash
+bash scripts/reproduce_main.sh                 # DEVICE = cuda if available, else cpu
+DEVICE=cpu bash scripts/reproduce_main.sh      # CPU-only reproduction (identical inputs)
+```
+Steps run in order: `env tests explore confirm fig2 metric scaling real build checksums`. Pick a subset with
+`STEPS="build checksums" bash scripts/reproduce_main.sh`. Each step writes `logs/<step>.log`, and
+`logs/timeline.log` records when each step starts. The script stops at the first failing step.
 
-## Outputs
+## 2. The same, step by step
+
+| # | Command | TODO item | Main outputs |
+|---|---|---|---|
+| 1 | `python -m pytest -q -rfEs tests.py test_t6.py tests/ --junitxml=logs/pytest_junit.xml` | all | test counts |
+| 2 | `python scripts/run_nested.py --seeds 1 2 3 4 --tag explore --out runs/explore --device cuda` | REP-03, CAL-01 | `runs/explore/*` |
+| 3 | `python scripts/run_nested.py --seeds 8 9 10 11 --tag confirm --out runs/confirm --device cuda` | REP-03, CAL-01 | `runs/confirm/*` |
+| 4 | `python scripts/fig2_counterexample.py` | Fig. 2 | `figures/fig_counterexample.pdf` |
+| 5 | `python scripts/metric_sensitivity.py` | MET-01 | `results/metric_*.{csv,tex}` |
+| 6 | `python scripts/benchmark_scaling.py --device cuda` | SCALE-01 | `results/scaling.{csv,tex}`, `figures/fig_scaling.pdf` |
+| 7 | `python scripts/real_audit.py` | REAL-01 | `results/real_audit*.{csv,tex,md}`, `figures/fig_real_audit.pdf` |
+| 8 | `python scripts/build_results.py --explore runs/explore --confirm runs/confirm --legacy-confirm legacy/nested2_summary_confirm.json` | CAL-02, REP-01/02, PRE-01 | `results/*`, `figures/*` |
+
+Optional step 2b, a second crosswalk that runs the *archived* program on the exploratory seeds:
+`python nested_anchors_v2.py --seeds 1 2 3 4 --out legacy/nested2_explore --device cuda && cp legacy/nested2_explore/nested2_summary.json legacy/nested2_summary_explore.json`
+(or `STEPS="legacy_explore" bash scripts/reproduce_main.sh`). Run it before step 8.
+
+Steps 2–3 are the heavy part: the full P0'' grid, 4 seeds each. Every other step reads only their outputs or
+uses small instances. The real audit and the metric LPs run on CPU.
+
+## 3. What each run writes (`runs/<tag>/`)
+
 | File | Content |
 |---|---|
-| `config.json` | the exact configuration, written before anything runs (pre-registration record) |
-| `records.jsonl` | one line per (d, ρ, n_A, model, κ, x, r, mode); `LA_C` = L_A(C), `LA_used` = L_A(A) |
-| `optimistic.jsonl` | **v3.** one line per (d, ρ, n_A, model, x, r, mode), **not** filtered by feasibility: ρ, signs, top-k at L_min, L_V (and L_true for `linear`, `unstable_id`), ρ^∞, κ_V = L_V / L_min, theorem checks |
-| `stress.json` | saturated anchors, one-feature references, 2-D counterexample (+ fa at L_V, gated), u + v counterexample (gated), stable-OOD |
-| `mc_coverage.json` | coverage on the least saturated feasible references (chosen by exact quantities before sampling), vacuity, negative control |
-| `runtime.json` | pairwise vs LP vs Monte Carlo |
-| `summary.json` | everything aggregated; `go` (technical) and `scientific` (usefulness) |
+| `config.json`, `config.yaml` | exact configuration, written **before** the first seed |
+| `manifest.json` | git commit + dirty files, Python/torch/numpy/scipy/pandas/pyarrow versions, CUDA devices, host, argv, sha256 of all source files and of every output |
+| `records_seed<s>.parquet` | **long per-feature table**, one row per (feature-instance, n, `L_kind`) — schema below |
+| `diag_seed<s>.parquet` | the exact `nested_anchors_v2` columns plus `fid`, `fid_prev` (same chain, previous n) and `fid_pair` (matched data-anchor row) |
+| `skips_seed<s>.csv` | every instance/mode not evaluated, with the reason (nothing is dropped silently) |
+| `blocks_seed<s>.csv` | runtime, peak RSS and CUDA peak memory per (seed, d, ρ_c) block |
+| `certificates.csv` | L_cert per (seed, d, ρ_c, generator), with its formula and per-coordinate bounds |
+| `rng_keys.csv` | RNG stream keys, covariance condition numbers, Mahalanobis 99% quantile, σ |
+| `seed_summary.csv` | quick per-seed aggregates for every `L_kind` |
+| `nested2_summary_v3.json` | `nested_anchors_v2`-style summary computed from the v3 diag rows |
 
-## Technical GO (`PHASE1_GO`)
-All of the following must be `true`; a skipped part is `"not_evaluated"` and blocks GO:
-- `stress_checks`: saturated, sparse reference, 2-D counterexample incl. fa inside at L_V, u + v closed form;
-- `grid_correctness`: no violation above `tol` in `records.jsonl`;
-- `optimistic_theorem_checks`: φ(f) inside at L_V (and at L_true), ρ monotone, ρ ≤ ρ^∞, nested signs / top-k, L_V ≤ L_true;
-- `mc_coverage`: binomial test of failure rate > η not rejected at 0.01;
-- `mc_non_vacuous`: median exact ρ < `mc_rho_max` (0.9) in both modes — otherwise the coverage test proves nothing;
-- `mc_negative_control_detected`: with the radius multiplied by `mc_neg_required` (0.0), the test **must** reject.
+### Lipschitz levels (`L_kind`)
 
-## Scientific verdict (`scientific`, per d)
-Needs `--sci-rho-target`, `--sci-min-frac`, `--sci-min-sign-rate` registered before the run.
-- **S3 valid_and_useful:** frac(ρ(L_V) ≤ target) ≥ min_frac and certified-sign rate at L_V ≥ min_sign_rate;
-- **S2 lost_to_model_roughness:** not S3, but frac(ρ(L_min) ≤ target) ≥ min_frac;
-- **S1 not_identifiable:** otherwise — even the optimistic ceiling fails.
+| `L_kind` | Level | Regime |
+|---|---|---|
+| `opt` | L_A(A_n) | optimistic; does **not** guarantee f ∈ F_L(A) |
+| `LV` | L_V = Lip(f on C_data ∪ C_prod ∪ hybrids) | oracle; uses hybrid responses, validation only |
+| `oracle` | L\* = max(L_true, L_V) | the oracle-valid level used throughout the draft |
+| `cert` | L_cert (`lipid/calibration.py`, appendix H) | certified globally from generator parameters and σ only; never touches hybrid responses, anchor labels or L_V |
 
-## Failure reporting
-`failure_by_kappa`, `failure_by_d_kappa`, `failure_by_model_kappa`: infeasible rate, conditional violation
-rate (among feasible) and total failure rate. Compare κ values with the total rate: per instance it is
-non-increasing in κ, the conditional rate is not.
+For `linear` and `unstable_id` (a = 4 > 0), L_true equals the analytic certificate, so L\* = L_cert and the
+draft's L\* results for these two generators are already certified. Hybrid responses are evaluated only to
+compute `true_phi` (containment checks) and L_V.
 
-## Validity conditions for the Monte Carlo certificates
-Candidate references fixed before sampling; `n_per_stratum` fixed in advance (no optional stopping);
-L ≥ L_A of every anchor set used (instances violating this are recorded as `infeasible`).
-`radius_scale < 1` gives **invalid** bounds by design and is used only as a negative control.
+### Record schema (`records_seed<s>`)
+`seed, model, d, rho_corr, mode, anchor_law (data|prod), n_anchor, chain_id, instance_id, x_id, r_id, feature_i,
+fid, delta_i, sigma_i, D_over_delta_i, Dbin, L_kind, L_A, L_V, L_true, L_star, L_cert, L_used, kappa (=L_used/L_A),
+lower_norm, upper_norm, lower_phi, upper_phi, Gamma, rho, true_phi, contained, cert_sign, saturation_gt_08,
+v_nest, v_Lorder, v_rhoL, runtime_sec, max_rss_mb, protocol`.
+N2 terms, geometry/range certificates (`low_com`, `range_com`, `uni_com`, …), the Mahalanobis tail share
+(`lowdens`) and `dRho` are in `diag_seed<s>`, under their `nested_anchors_v2` names.
 
-## Known limitations (not addressed in v3)
-- Changing n_A redraws train (σ), C, R_candidate and x (`gen_of("data", seed, d, rho, nA)`): comparisons
-  across n_A are population-level, not paired. A nested-anchor ablation with fixed x, r, σ is P1.
-- Feature grouping and anchor design are P1.
+Per-row check flags must all be 0: `contained` = 1 at `LV`, `oracle` and `cert`; `v_nest` = 0 (same-L
+nesting); `v_Lorder` = 0 (L_cert ≥ L_V ≥ L_A); `v_rhoL` = 0 (ρ monotone in L). `run_nested.py` prints these
+counts per seed, next to the legacy checks.
+
+## 4. What `build_results.py` writes (`results/`, `figures/`)
+
+| Draft object | File |
+|---|---|
+| Table 2 `tab:calcert` | `calibration_table.tex` (+ `calibration_by_seed.csv`, stratified by generator × d × mode × n × seed × law) |
+| Table 3 `tab:prevalence` | `tab_prevalence.tex` (+ `prevalence_by_seed.csv` with denominators) |
+| Table 4 `tab:dist` | `tab_dist.tex` (8 pooled seeds, as in the draft) and `tab_dist_confirm.tex` (seeds 8–11) |
+| Table 5 `tab:criteria` | `tab_criteria.tex`, `criteria_status.csv`, `criteria_reconstructed_cells.csv`, `preregistration_ledger.md` |
+| Table 6 (scaling) | `scaling.tex` (from step 6) |
+| Metric sensitivity | `metric_sensitivity.tex` (step 5) |
+| Real audit | `real_audit.tex` (step 7) |
+| Figs. 2 / 3 / 4 | `fig_counterexample.pdf`, `fig_saturation_prevalence.pdf`, `fig_anchor_law_gap.pdf` |
+| New figures | `fig_certified_calibration.pdf`, `fig_anchor_law_strata.pdf`, `fig_scaling.pdf`, `fig_real_audit.pdf` |
+| Numbers quoted in §6.3–6.6 and §7 | `text_numbers.csv` (key, value range, definition, source) |
+| Paired effects (REP-01) | `paired_effects_by_seed.csv`, `paired_effects_summary.csv`, `matched/<tag>_{nesting,anchor_law,N2}.parquet` (with `id_left`, `id_right`, `metric`, `difference`, `seed`, `chain_id`) |
+| Anchor law, subgroups (REP-02) | `anchor_law_by_seed.csv`, `anchor_law_dpair_by_seed.csv`, `subgroups_d_over_delta.csv`, `anchor_law_reversal_counts.csv`, `mahalanobis_tail.csv` |
+| Reproducibility | `legacy_crosswalk_confirm.json` (+ mismatches CSV), `provenance.md`, `uncertainty_methods.md`, `crosswalk_paper.md` (with figure captions), `build_report.json` (`issues` must be empty), `main_tables.tex` (all fragments) |
+
+**Legacy crosswalk.** `build_results.py` recomputes the `nested_anchors_v2` summary from the new raw diag rows
+and compares every statistic with `legacy/nested2_summary_confirm.json` (tolerance 1e-9). The verdict is
+`REPRODUCED` or a list of deviations. CUDA reductions can differ in the last ulp; a deviation that crosses a
+threshold (for example ρ > 0.8) shows up in the mismatches CSV and has to be reported.
+
+**Uncertainty.** The independent unit is the seed: within a seed, one anchor chain is shared by all 20 (x, r)
+pairs, all generators and both modes. Spreads are therefore descriptive seed min–max over 4 seeds. No
+confidence intervals and no bootstrap over features (see `results/uncertainty_methods.md`).
+
+**Pre-registration.** C1–C5 are evaluated mechanically from the reconstructed rules
+(`lipid/analysis.py::OPERATIONALIZATION`). The historical labels (C2b not met, C4b partly met, C5 invalid
+specification) are kept verbatim. The original locked protocol text is **not in this archive** and should be
+attached to `results/preregistration_ledger.md`.
+
+## 5. New modules
+
+| File | Content |
+|---|---|
+| `lipid/calibration.py` | global weighted-ℓ1 certificates for the four generators; c_q closed form; c_t certified by a bracketed root argument. Uses \|a\| (the legacy `phase1.lipschitz_true` uses a signed a, which is invalid for a < 0; this does not affect the archived runs, which use a = 4) |
+| `lipid/pipeline.py` | v3 nested runner (row-level outputs, four L levels) |
+| `lipid/metric_lp.py` | exact finite-hybrid LP for any weighted ℓ_p (HiGHS) and the edgewise aggregate; appendix-B counterexample |
+| `lipid/mc.py` | appendix-F stratified Hoeffding bounds (`log_constant='paper'` = log(4m²/α); `'tight'` = log(2m²/α) also valid) |
+| `lipid/core.py` | Theorem-1 intervals by enumeration, exact Shapley from vertices, sign/containment helpers |
+| `lipid/analysis.py` | criteria reconstruction, seed-level summaries |
+| `lipid/provenance.py`, `lipid/io.py` | manifests, checksums, parquet/CSV I/O |
+
+## 6. What to send back after running
+`logs/` (all), `results/` (without `matched/` and `scaling_cache/` unless asked), `figures/`,
+`runs/*/{manifest.json,config.yaml,seed_summary.csv,certificates.csv,skips_seed*.csv,blocks_seed*.csv}`.
+The large `records_*/diag_*` parquet files only if a deviation has to be investigated.
+
+The original Phase-1 README is kept as `legacy/README_phase1.md`.

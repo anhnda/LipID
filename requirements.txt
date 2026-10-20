@@ -1,0 +1,8 @@
+numpy>=1.23
+scipy>=1.9          # HiGHS LP solver
+torch>=2.0          # CUDA optional
+pandas>=1.5
+pyarrow>=12         # parquet; without it outputs fall back to .csv.gz
+matplotlib>=3.6
+scikit-learn>=1.1   # REAL-01 only (bundled diabetes data, no download)
+pytest>=7
