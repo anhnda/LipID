@@ -1,8 +1,9 @@
-# LipID v1.2 — Kế hoạch coding cho bản revision (targeted revision)
+# LipID v1.2 — Kế hoạch coding và thứ tự chạy cho bản revision
 
-> **Trạng thái:** toàn bộ code dưới đây được viết theo yêu cầu *không chạy* — chưa có lệnh nào được thực thi, kể cả test.
-> Bước đầu tiên khi bạn chạy là `STEPS="tests_v12" bash scripts/reproduce_revision.sh`. Nếu một test fail, sửa trước
-> khi chạy bất kỳ thí nghiệm nào (các test được thiết kế để bắt lỗi toán/RNG trước khi tốn GPU).
+> **Trạng thái (2026-10-20, 23:40):** Phase 1–4 và build đã chạy trên server; kết quả tổng hợp trong
+> `All_results.md` (repo paper). Còn lại: ghim phiên bản (`requirements-lock.txt`), chạy lại trong môi trường sạch,
+> đóng gói release, kiểm tra mốc thời gian của lock. JNT-01 có một tiêu chí khai báo trước **không đạt** (đã chẩn
+> đoán, phải báo cáo — xem §3, bước 1).
 
 Code v1.1 (`lipid/*.py` cũ, `scripts/*` cũ, các module lịch sử ở root) **không bị sửa**. Mọi thứ mới chỉ *import*
 chúng. `tests/test_pipeline_regression.py` vẫn là khóa an toàn cho pipeline cũ.
@@ -51,40 +52,40 @@ thái complete / partial / NOT RUN cho từng hạng mục) và `build_report_v1
 
 ---
 
-## 3. Thứ tự chạy (theo Phase của kế hoạch)
+## 3. Thứ tự chạy (đã cập nhật theo lần chạy thực tế)
+
+Quy ước server: **chỉ `git pull`**. Mọi file code/protocol/lock phải commit + push từ máy local rồi pull trên server.
+Output (`runs/`, `results_v12/`, `figures_v12/`, `logs/`) không commit (xem `.gitignore`). Mỗi bước ghi
+`logs/v12_<step>.log`; thời điểm bắt đầu nằm trong `logs/v12_timeline.log`.
+
+| # | Lệnh (trên server) | Kết quả mong đợi / điều kiện qua bước | Trạng thái |
+|---|---|---|---|
+| 0 | `git checkout HEAD -- .DS_Store results_v12/.gitkeep figures_v12/.gitkeep` (nếu pull báo lỗi) rồi `git pull` | `git status --porcelain -- lipid scripts protocols` không in gì | — |
+| 1 | `STEPS="tests_v12 jnt01 jnt01_diag" bash scripts/reproduce_revision.sh` | pytest pass. `jnt01` có thể trả exit 1 (verdict không đạt) — được ghi lại, không chặn pipeline. `jnt01_diag` phải cho **0 dòng GENUINE** | **đã chạy**: verdict *not accepted* (30 dòng), chẩn đoán 15 `L_below_exact_LA` + 15 `roundoff_only`, 0 GENUINE |
+| 2 | `STEPS="pairs_explore pairs_confirm jnt02 jnt03" bash scripts/reproduce_revision.sh` | `results_v12/jnt02_integrity.json` toàn 0; JNT-03 `exact_weaker_than_prop2 = 0` | **đã chạy**, mọi kiểm tra = 0 |
+| 3a | (local) sửa protocol nếu cần → commit → push; (server) `git pull`; `STEPS="lock_stat01" bash scripts/reproduce_revision.sh` | ghi `protocols/locks/STAT-01.lock.json`; từ chối nếu file bị khóa chưa commit/bị sửa | **đã chạy** (19:48:12, commit `6b8ca02`) |
+| 3b | copy file lock về local → commit → push; (server) `mv protocols/locks/STAT-01.lock.json{,.server} && git pull && cmp protocols/locks/STAT-01.lock.json{,.server}` | `cmp` không báo khác; `python scripts/lock_protocol.py verify --lock protocols/locks/STAT-01.lock.json` → `ok: true` | **đã chạy** |
+| 3c | `STEPS="stat01_nested stat01_pairs stat01_analyze jnt02_final" bash scripts/reproduce_revision.sh` | `stat01_manifest.json: lock.ok = true` | **đã chạy**, lock ok |
+| 3d | `git log -1 --format='%H %cI' -- protocols/locks/STAT-01.lock.json` và `grep stat01_nested logs/v12_timeline.log` | mốc commit lock trên remote **trước** mốc bắt đầu `stat01_nested` | **CHƯA kiểm tra** |
+| 4 | `STEPS="met02 scl02_pilot scl02_eval scl02_analyze cert02" bash scripts/reproduce_revision.sh` | `met02_checks.json`, `cert02_checks.json` toàn 0; `scl02_pilot` chỉ chạy **một lần** (script từ chối ghi đè) | **đã chạy** |
+| 4b | `python scripts/met02_scale_sensitivity.py --analyze-only` | sinh lại `met02_real.tex` với caption đã sửa (SD ≠ unit trên tập train của diabetes) | cần chạy lại sau khi pull |
+| 5 | `STEPS="build_v12" bash scripts/reproduce_revision.sh` | `results_v12/crosswalk_v12.md`; `build_report_v12.json: issues` chỉ còn REP-01 cho tới bước 6 | **đã chạy** |
+| 6a | ghim phiên bản: xem lệnh ngay dưới bảng → copy `requirements-lock.txt` về local → commit → push → `git pull` | file `requirements-lock.txt` có trong HEAD | **CHƯA** |
+| 6b | `rm -rf repro_check && STEPS="clean_env verify release build_v12" bash scripts/reproduce_revision.sh` | `results_v12/verification_report.md: PASS` với scope ghi rõ; JNT-01 lặp lại đúng verdict *not accepted* với cùng 30 dòng; tarball `release/lipid_v1.2_<commit>.tar.gz` | **CHƯA** |
+| 7 | copy về local: `results_v12/*.{tex,csv,md,json}`, `figures_v12/*.pdf`, tarball + `.sha256` | đưa `figures_v12/fig_jnt02_certification.pdf` vào `figures/` của repo paper; upload tarball lên Zenodo, ghi DOI | **CHƯA** |
+
+Lệnh cho bước 6a (chạy trong env đã sinh kết quả, ví dụ `conda activate xfrt128`):
 
 ```bash
-# Phase 1 — theory validation (CPU đủ)
-STEPS="tests_v12 jnt01" bash scripts/reproduce_revision.sh
-#   điều kiện qua: pytest pass; results_v12/jnt01_manifest.json -> verdict.accepted = true
-
-# Phase 2 — main empirical evaluation (GPU), dùng lại runs/explore, runs/confirm của v1.1
-STEPS="pairs_explore pairs_confirm jnt02 jnt03" bash scripts/reproduce_revision.sh
-#   điều kiện qua: jnt02_integrity.json toàn 0; jnt03 checks.exact_weaker_than_prop2 = 0
-
-# Phase 3 — confirmatory + reproducibility
-#   (a) sửa protocols/v12_preregistration.json nếu cần -> git commit -> lock (cây sạch!) -> commit file lock
-STEPS="lock_stat01" bash scripts/reproduce_revision.sh
-git add protocols/locks/STAT-01.lock.json && git commit -m "lock STAT-01"
-#   (b) chạy batch độc lập (lock được verify trước khi chạy; mọi thay đổi sau lock bị ghi là deviation)
-STEPS="stat01_nested stat01_pairs stat01_analyze jnt02_final" bash scripts/reproduce_revision.sh
-#   (c) tái lập trong môi trường sạch + đóng gói
-STEPS="clean_env verify release" bash scripts/reproduce_revision.sh
-
-# Phase 4 — targeted robustness (chỉ những gì trả lời reviewer)
-STEPS="met02 scl02_pilot scl02_eval scl02_analyze cert02" bash scripts/reproduce_revision.sh
-
-# Phase 5 — manuscript integration
-STEPS="build_v12" bash scripts/reproduce_revision.sh     # đọc results_v12/crosswalk_v12.md
+pip freeze | grep -iE '^(numpy|scipy|torch|pandas|pyarrow|matplotlib|scikit-learn|pytest)==' > requirements-lock.txt
+cat requirements-lock.txt
+# nếu dòng torch có hậu tố +cu128: thêm dòng đầu file
+#   --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
-Mỗi bước ghi `logs/v12_<step>.log`; `logs/v12_timeline.log` lưu thời điểm bắt đầu. Script dừng ở bước fail đầu tiên.
-Thời gian chạy **chưa được đo** (không chạy gì). Ước lượng tương đối: `run_pairwise` ≈ chi phí một seed của
-`run_nested` (phải tái tạo L_V) — xem `runs/confirm/blocks_seed*.csv` của v1.1 để ước lượng; STAT-01 = 24 seed ×
-(run_nested + run_pairwise). Nếu ngân sách không đủ cho 24 seed, giảm số seed **trong protocol trước khi lock**;
-dưới 10 seed thì `stat01_analyze.py` tự động chỉ báo cáo min–max (không tạo CI).
-
----
+`clean_env` tạo venv riêng trong `repro_check/venv` (không đụng env conda), lấy code bằng `git archive HEAD` vào
+`repro_check/src`, chạy các bước trong `REPRO_STEPS` (mặc định `tests fig2 metric real tests_v12 jnt01 jnt01_diag`),
+rồi so sánh bảng với bản lưu (rtol 1e-9). Bước nào không chạy lại sẽ được ghi "not re-run" trong báo cáo.
 
 ## 4. Mô tả từng file mới
 
@@ -105,6 +106,7 @@ dưới 10 seed thì `stat01_analyze.py` tự động chỉ báo cáo min–max 
 | Script | Hạng mục | Lệnh |
 |---|---|---|
 | `jnt01_validate_pairwise.py` | JNT-01 | `--workers 8` (CPU, LP song song); exit 1 nếu vượt tolerance |
+| `jnt01_diagnose_constr.py` | JNT-01 (post-hoc) | kiểm lại các dòng `fail_constr` bằng số học hữu tỉ chính xác; phân loại `L_below_exact_LA` / `roundoff_only` / `GENUINE`; không đổi verdict |
 | `run_pairwise.py` | JNT-02 runner | `--seeds 8 9 10 11 --tag confirm --out runs/pairs_confirm` |
 | `jnt02_analyze.py` | JNT-02 bảng/hình | `--run confirm=runs/pairs_confirm ...` |
 | `jnt03_absolute_lp.py` | JNT-03 | tập con cố định theo index (seed 8–11, x_id 0–1) |
@@ -130,19 +132,18 @@ reduction = all-pairs theo hướng ngẫu nhiên), `mc_certdiag` (tái tạo `l
 `v12_theory.tex` (Prop. J, Cor. pairwise, Prop. ranking, Remark Σ, Prop. E.2 + chứng minh), `v12_experiments.tex`
 (khung text dùng `\lipnum{...}`; chỗ `[...]` chỉ viết sau khi có kết quả), `v12_discussion.tex` (Q4, Q1, bốn thuộc
 tính), `response_to_reviewers_v12.md` (khung trả lời Q1–Q7).
-**Cần map label:** các `\ref` trong file tex mới giả định label `thm:sharp`, `prop:certs` (Prop. 2), `eq:envelopes`
-(eq. 7), `eq:directional` (eq. 10), `prop:geomrange` (Prop. 7), `prop:optimistic` (Prop. 6), `tab:calcert` — đổi theo
-label thật trong `lipid_v1_1.tex`.
+Các file `paper/v12_*.tex` là bản nháp rời; bản đã tích hợp (label đã map theo v1.1, số liệu thật) là
+`lipid_v1_2.tex` trong repo paper.
 
 ---
 
 ## 5. Tiêu chí hoàn thành (definition of done, kiểm được bằng máy)
 1. `pytest tests/` pass (cũ + mới).
-2. `jnt01_manifest.json: verdict.accepted = true` (0 so sánh vượt 1e-8; 0 vi phạm attainment).
+2. JNT-01: `verdict.accepted = true`, **hoặc** verdict không đạt nhưng `jnt01_constr_diagnosis.md` cho 0 dòng `GENUINE` và failure được báo cáo trong paper (trạng thái hiện tại).
 3. `jnt02_integrity.json`, `jnt03` checks, `cert02_checks.json`, `met02_checks.json`: mọi bộ đếm vi phạm = 0.
 4. `stat01_manifest.json: lock.ok = true` (nếu false → kết quả bị gắn nhãn deviation trong bảng, không được giấu).
 5. `verification_report.md: PASS`, với phạm vi rerun ghi rõ.
-6. `build_report_v12.json: issues = []`, `crosswalk_v12.md` không còn hạng mục "NOT RUN" cho P0.
+6. `build_report_v12.json: issues = []` (JNT-01 nằm ở mục `JNT-01_reported_failure`, không chặn), `crosswalk_v12.md` không còn hạng mục "NOT RUN" hay "integrity check only (no rerun)".
 
 ## 6. Ngoài phạm vi (P2) — không code
 Active query acquisition; mở rộng định lý sang conditional/manifold Shapley (chỉ thảo luận); local Lipschitz

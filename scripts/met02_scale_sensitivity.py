@@ -17,8 +17,8 @@ Design (protocol MET-02): with the Section-6 Gaussian design (identical unit-var
 coincide up to estimation noise and a common factor, so the comparison would be vacuous. The synthetic design therefore
 uses a Gaussian copula (rho_c in {0, .9}) with coordinate marginals cycling gauss / t3 / lognormal / binary(Z > .5),
 multiplied by log-spaced scales from 0.25 to 4. Real data: the REAL-01 diabetes split and models (ridge, ReLU net).
-Note: sklearn's diabetes features are pre-scaled to equal SD, so there `unit` equals `sd` up to a common factor and the
-two give identical intervals by the invariance above; only `mad` differs.
+Note: sklearn's diabetes features are pre-scaled to equal SD on the FULL 442 records; sigma is computed on the 242-record
+training split, where the SDs differ slightly, so `unit` and `sd` are close but not identical.
 
 Outputs: results_v12/met02_features.csv.gz, met02_instances.csv.gz, met02_summary.csv, met02_paired.csv,
 met02_real.csv, met02_table.tex, met02_real.tex, met02_checks.json, numbers_met02.csv, figures_v12/fig_met02.pdf.
@@ -313,7 +313,7 @@ def analyze(F, I, Rr, inv, out, figs):
             fh.write(tex_table(["model", "$\\sigma$", "mode", "$n_{\\log}$", "level", "med.\\ $\\rho$", "$p_{\\mathrm{sat}}$",
                                 "sign", "rank (pair)", "contain"], rows,
                                "MET-02 on the diabetes audit: the scale choice with re-certified $L$ (\\emph{unit} and "
-                               "\\emph{sd} coincide here because the bundled features have equal SD).", "tab:met02real",
+                               "\\emph{sd} are close because the bundled features have equal SD on the full dataset, not on the training split).", "tab:met02real",
                                align="lllrlrrrrr", size="\\scriptsize"))
     import matplotlib
     matplotlib.use("Agg")

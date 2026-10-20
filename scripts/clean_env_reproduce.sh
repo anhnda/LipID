@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 WORK="${WORK:-$ROOT/repro_check}"
-REPRO_STEPS="${REPRO_STEPS:-tests fig2 metric real tests_v12 jnt01}"
+REPRO_STEPS="${REPRO_STEPS:-tests fig2 metric real tests_v12 jnt01 jnt01_diag}"
 DEVICE="${DEVICE:-cpu}"
 mkdir -p "$WORK"
 rm -rf "$WORK/src"

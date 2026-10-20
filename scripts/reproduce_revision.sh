@@ -7,11 +7,11 @@
 #   DEVICE=cpu WORKERS=8 bash scripts/reproduce_revision.sh
 #
 # Steps (default order):
-#   tests_v12 jnt01 pairs_explore pairs_confirm jnt02 jnt03 met02 scl02_pilot scl02_eval scl02_analyze cert02 build_v12
+#   tests_v12 jnt01 jnt01_diag pairs_explore pairs_confirm jnt02 jnt03 met02 scl02_pilot scl02_eval scl02_analyze cert02 build_v12
 # Confirmatory STAT-01 (run separately, after committing and locking):
 #   lock_stat01 stat01_nested stat01_pairs stat01_analyze jnt02_final build_v12
 # Release / verification:
-#   verify  release  clean_env
+#   clean_env  verify  release   (in this order; pin versions in requirements-lock.txt first)
 # Every step logs to logs/v12_<step>.log; logs/v12_timeline.log records start times; set -e stops at the first failure.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,7 +20,7 @@ if [[ -z "${DEVICE:-}" ]]; then
   DEVICE="$($PY -c 'import torch; print("cuda" if torch.cuda.is_available() else "cpu")')"
 fi
 WORKERS="${WORKERS:-$($PY -c 'import os; print(max(1, (os.cpu_count() or 2) - 1))')}"
-STEPS="${STEPS:-tests_v12 jnt01 pairs_explore pairs_confirm jnt02 jnt03 met02 scl02_pilot scl02_eval scl02_analyze cert02 build_v12}"
+STEPS="${STEPS:-tests_v12 jnt01 jnt01_diag pairs_explore pairs_confirm jnt02 jnt03 met02 scl02_pilot scl02_eval scl02_analyze cert02 build_v12}"
 STAT_SEEDS="$($PY -c 'import json; print(" ".join(map(str, json.load(open("protocols/v12_preregistration.json"))["experiments"]["STAT-01"]["seeds"])))')"
 LOCK="protocols/locks/STAT-01.lock.json"
 mkdir -p logs runs results_v12 figures_v12 protocols/locks
@@ -40,6 +40,8 @@ if has jnt01; then
   run jnt01 $PY scripts/jnt01_validate_pairwise.py --workers "$WORKERS" \
     || stamp "jnt01 exited non-zero: verdict NOT accepted (results_v12/jnt01_manifest.json); recorded, continuing"
 fi
+# post-hoc exact-rational diagnosis of any jnt01 construction failures (never changes the verdict)
+has jnt01_diag     && run jnt01_diag $PY scripts/jnt01_diagnose_constr.py
 has pairs_explore  && run pairs_explore $PY scripts/run_pairwise.py --seeds 1 2 3 4 --tag explore --out runs/pairs_explore --device "$DEVICE"
 has pairs_confirm  && run pairs_confirm $PY scripts/run_pairwise.py --seeds 8 9 10 11 --tag confirm --out runs/pairs_confirm --device "$DEVICE"
 has jnt02          && run jnt02 $PY scripts/jnt02_analyze.py --run explore=runs/pairs_explore --run confirm=runs/pairs_confirm --main confirm
