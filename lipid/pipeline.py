@@ -156,7 +156,7 @@ def run_seed(seed: int, args, ns, device: str, log=print):
                                                             sigma, args.block))
                 fCall = torch.cat([per[a]["fC"] for a in arms])
                 cert = certify(model, d, sigma, cfg.a)          # sigma + generator parameters only
-                cert_meta.append(dict(seed=seed, d=d, rho_corr=rhoc, **cert.as_dict()))
+                cert_meta.append(dict(seed=seed, rho_corr=rhoc, **cert.as_dict()))   # as_dict() already holds d, model, a
                 models[model] = (f, f(Xev), f(Rc), per, Lcc_all, fCall, P.lipschitz_true(model, d, sigma, cfg.a),
                                  cert.L_cert)
 
