@@ -47,16 +47,36 @@ def key_collisions(new_seeds, dims=(3, 4, 5, 6), rhos=(0.0, 0.6, 0.9, 0.99)) -> 
     return [ks for ks in inv.values() if len(ks) > 1]
 
 
+def locked_files_git_state(files) -> dict:
+    """Only the LOCKED files matter: each must be tracked by git and identical to HEAD. Other dirty paths (untracked
+    outputs, unrelated edits) are recorded for information but do not block the lock."""
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=ROOT, capture_output=True, text=True)
+    untracked = [f for f in files if git("ls-files", "--error-unmatch", f).returncode != 0]
+    st = git("status", "--porcelain", "--", *files)
+    modified = [ln[3:] for ln in st.stdout.splitlines() if ln and not ln.startswith("??")] if st.returncode == 0 else ["<git error>"]
+    other = [ln for ln in git("status", "--porcelain").stdout.splitlines()]
+    return dict(untracked=untracked, modified=modified, n_other_dirty_paths=len(other), other_dirty_paths=other[:200])
+
+
 def write_lock(protocol_path: str, out_path: str, *, experiment: str, seeds=None, code_files=None,
                allow_dirty: bool = False, note: str = "") -> dict:
     if os.path.exists(out_path):
         raise FileExistsError(f"{out_path} exists: a lock is never overwritten (write a new versioned lock instead)")
     g = git_info()
-    if g.get("dirty") and not allow_dirty:
-        raise RuntimeError("git working tree is dirty: commit first (or pass --allow-dirty and say so in the paper)")
     code_files = code_files or default_code_files()
-    lock = dict(experiment=experiment, created_local=now(), protocol=os.path.relpath(protocol_path, ROOT),
-                protocol_sha256=sha256(protocol_path), git=g, seeds=list(seeds or []), note=note,
+    prot_rel = os.path.relpath(protocol_path, ROOT)
+    state = locked_files_git_state(sorted(set(code_files) | {prot_rel}))
+    if (state["untracked"] or state["modified"] or g.get("commit") is None) and not allow_dirty:
+        raise RuntimeError("locked files must be committed and unmodified at HEAD "
+                           f"(untracked: {state['untracked']}, modified: {state['modified']}, commit: {g.get('commit')}). "
+                           "Untracked outputs (runs/, results_v12/, logs/) do not matter. "
+                           "--allow-dirty only if the paper says so.")
+    lock = dict(experiment=experiment, created_local=now(), protocol=prot_rel,
+                protocol_sha256=sha256(protocol_path), git=g, locked_files_git_state=state,
+                seeds=list(seeds or []), note=note,
                 code_sha256={f: sha256(os.path.join(ROOT, f)) for f in code_files if os.path.isfile(os.path.join(ROOT, f))})
     if seeds:
         col = key_collisions(seeds)

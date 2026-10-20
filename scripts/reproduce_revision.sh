@@ -44,7 +44,9 @@ has jnt03          && run jnt03 $PY scripts/jnt03_absolute_lp.py --device "$DEVI
 if has lock_stat01; then
   if [[ -f "$LOCK" ]]; then stamp "lock exists: $LOCK (not overwritten)"; else
     run lock_stat01 $PY scripts/lock_protocol.py lock --experiment STAT-01 --out "$LOCK"
-    stamp "commit the lock now: git add $LOCK && git commit -m 'lock STAT-01 protocol'"
+    stamp "NEXT: copy $LOCK to the machine that can push, commit + push it, then on this server:"
+    stamp "      mv $LOCK $LOCK.server && git pull && cmp $LOCK $LOCK.server && rm $LOCK.server"
+    stamp "      run stat01_* only after the pushed lock commit exists on the remote (its timestamp precedes outputs)"
   fi
 fi
 if has stat01_nested; then
