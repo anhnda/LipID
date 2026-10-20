@@ -76,7 +76,10 @@ has scl02_eval     && run scl02_eval $PY scripts/scl02_nonsaturated.py eval --de
 has scl02_analyze  && run scl02_analyze $PY scripts/scl02_nonsaturated.py analyze
 has cert02         && run cert02 $PY scripts/cert02_diagnostics.py --device "$DEVICE"
 has build_v12      && run build_v12 $PY scripts/build_revision.py
-has verify         && run verify $PY scripts/verify_release.py --check-manifests
-has release        && run release bash scripts/make_release.sh
+# order matters: the clean-environment rerun first (it writes the verification report with its scope),
+# then the on-disk integrity check, then packaging
 has clean_env      && run clean_env bash scripts/clean_env_reproduce.sh
+has verify         && run verify $PY scripts/verify_release.py --check-manifests --out results_v12/integrity \
+                        --scope "${VERIFY_SCOPE:-on-disk integrity only (manifests and checksums); no independent rerun in this step}"
+has release        && run release bash scripts/make_release.sh
 stamp "done"
